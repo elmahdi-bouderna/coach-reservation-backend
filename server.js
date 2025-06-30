@@ -70,10 +70,15 @@ global.notifyUser = (userId, data) => {
 
 // Middleware
 app.use(cors({
-    origin: process.env.NODE_ENV === 'production' 
-        ? ['https://your-frontend-domain.onrender.com', 'https://your-custom-domain.com'] 
-        : ['http://localhost:3000'],
-    credentials: true
+    origin: [
+        'http://localhost:3000',
+        'http://localhost:3001', 
+        'https://coach-reservation-frontend.onrender.com',
+        'https://your-custom-domain.com'
+    ],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
