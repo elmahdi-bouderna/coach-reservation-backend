@@ -74,6 +74,8 @@ app.use(cors({
         'http://localhost:3000',
         'http://localhost:3001', 
         'https://coach-reservation.vercel.app',
+        'https://fitlek.tech',
+        'https://www.fitlek.tech',
         'https://coach-reservation-frontend.onrender.com',
         'https://your-custom-domain.com'
     ],
