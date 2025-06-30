@@ -1,0 +1,248 @@
+const express = require('express');
+const router = express.Router();
+const db = require('../config/database');
+const { sendReservationConfirmation, sendCoachNotification } = require('../utils/emailService');
+
+// Create a new reservation
+router.post('/reserve', async (req, res) => {
+    console.log('\n=== RESERVATION REQUEST RECEIVED ===');
+    console.log('Request body:', req.body);
+    
+    const connection = await db.getConnection();
+    
+    try {
+        await connection.beginTransaction();
+        
+        const {
+            coach_id,
+            full_name,
+            email,
+            phone,
+            age,
+            gender,
+            goal,
+            date,
+            time,
+            created_by = 'client',
+            user_id = null
+        } = req.body;
+
+        // Validate required fields
+        const missingFields = [];
+        if (!coach_id) missingFields.push('coach_id');
+        
+        // If user_id is not provided, then all personal details are required
+        if (!user_id) {
+            if (!full_name) missingFields.push('full_name');
+            if (!email) missingFields.push('email');
+            if (!phone) missingFields.push('phone');
+            if (!age) missingFields.push('age');
+            if (!gender) missingFields.push('gender');
+        }
+        
+        // These fields are always required
+        if (!date) missingFields.push('date');
+        if (!time) missingFields.push('time');
+
+        if (missingFields.length > 0) {
+            await connection.rollback();
+            return res.status(400).json({ 
+                error: `Missing required fields: ${missingFields.join(', ')}`,
+                missingFields: missingFields 
+            });
+        }
+
+        // Check if the requested date and time are in the past
+        const now = new Date();
+        const currentDate = now.toISOString().split('T')[0]; // YYYY-MM-DD
+        const currentTime = now.toTimeString().split(' ')[0].substring(0, 8); // HH:MM:SS
+        
+        console.log(`Checking if reservation is in the past: ${date} ${time} vs current ${currentDate} ${currentTime}`);
+        
+        if (date < currentDate || (date === currentDate && time < currentTime)) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ 
+                error: 'Cannot book a session in the past. Please select a future date and time.'
+            });
+        }
+
+        // Check if the slot is still available
+        const [availabilityCheck] = await connection.execute(`
+            SELECT id FROM coach_availability 
+            WHERE coach_id = ? AND date = ? AND start_time = ? AND is_booked = 0
+        `, [coach_id, date, time]);
+
+        if (availabilityCheck.length === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ 
+                error: 'This time slot is no longer available'
+            });
+        }
+        
+        let reservationData;
+        let params;
+        
+        // If user_id is provided (logged in user), get user details from the database
+        if (user_id) {
+            const [userData] = await connection.execute(`
+                SELECT full_name, email, phone, age, gender, goal, points 
+                FROM users WHERE id = ?
+            `, [user_id]);
+            
+            if (userData.length === 0) {
+                await connection.rollback();
+                connection.release();
+                return res.status(404).json({ error: 'User not found' });
+            }
+            
+            const user = userData[0];
+            
+            // Check if user has enough points
+            if (user.points < 1) {
+                await connection.rollback();
+                connection.release();
+                return res.status(400).json({ 
+                    error: `Not enough points. You need at least 1 point to book a session. You currently have ${user.points} points.`
+                });
+            }
+            
+            // Deduct points
+            await connection.execute(`
+                UPDATE users SET points = points - 1 WHERE id = ?
+            `, [user_id]);
+            
+            // Use user profile data from database
+            reservationData = `
+                INSERT INTO reservations (coach_id, full_name, email, phone, age, gender, goal, date, time, created_by, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `;
+            
+            params = [
+                coach_id, 
+                user.full_name, 
+                user.email, 
+                user.phone, 
+                user.age, 
+                user.gender, 
+                goal || user.goal, // Allow overriding goal for this specific session
+                date, 
+                time, 
+                created_by,
+                user_id
+            ];
+        } else {
+            // No user_id, use data from the request
+            reservationData = `
+                INSERT INTO reservations (coach_id, full_name, email, phone, age, gender, goal, date, time, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `;
+            
+            params = [
+                coach_id, 
+                full_name, 
+                email, 
+                phone, 
+                age, 
+                gender, 
+                goal, 
+                date, 
+                time, 
+                created_by
+            ];
+        }
+
+        // Create the reservation
+        const [reservationResult] = await connection.execute(reservationData, params);
+
+        // Mark the slot as booked
+        await connection.execute(`
+            UPDATE coach_availability 
+            SET is_booked = 1 
+            WHERE coach_id = ? AND date = ? AND start_time = ?
+        `, [coach_id, date, time]);
+
+        // Get updated points if user_id is provided
+        let updatedPoints = null;
+        if (user_id) {
+            const [pointsResult] = await connection.execute('SELECT points FROM users WHERE id = ?', [user_id]);
+            updatedPoints = pointsResult[0].points;
+        }
+
+        // Get coach details for the response and email
+        const [coachDetails] = await connection.execute('SELECT name, email FROM coaches WHERE id = ?', [coach_id]);
+        
+        if (coachDetails.length === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(404).json({ error: 'Coach not found' });
+        }
+        
+        const coach = coachDetails[0];
+
+        // Commit the transaction
+        await connection.commit();
+        connection.release();
+        
+        // Format the reservation details for the response
+        const reservation = {
+            id: reservationResult.insertId,
+            coach_id,
+            coach_name: coach.name,
+            full_name: params[1], // full_name is the second parameter in both query variations
+            email: params[2],     // email is the third parameter
+            phone: params[3],
+            age: params[4],
+            gender: params[5],
+            goal: params[6],
+            date,
+            time,
+            created_at: new Date(),
+            points_deducted: 1,
+            remaining_points: updatedPoints
+        };
+        
+        console.log('Reservation created successfully');
+        
+        // Try to send email notifications
+        try {
+            // Send email to client
+            if (reservation.email) {
+                console.log(`Sending confirmation email to client: ${reservation.email}`);
+                await sendReservationConfirmation(reservation);
+            }
+            
+            // Send email to coach
+            if (coach.email) {
+                console.log(`Sending notification email to coach: ${coach.email}`);
+                await sendCoachNotification(reservation, coach.email);
+            }
+        } catch (emailError) {
+            console.error('Error sending email notifications:', emailError);
+            // We don't want to fail the reservation if emails fail
+        }
+        
+        res.status(201).json(reservation);
+    } catch (error) {
+        console.error('Error creating reservation:', error);
+        
+        try {
+            await connection.rollback();
+        } catch (rollbackError) {
+            console.error('Error rolling back transaction:', rollbackError);
+        }
+        
+        connection.release();
+        
+        res.status(500).json({ 
+            error: 'Failed to create reservation',
+            message: error.message
+        });
+    }
+});
+
+// Get all reservations
+// ... rest of the file remains unchanged
+
+module.exports = router;

@@ -1,0 +1,428 @@
+const express = require('express');
+const router = express.Router();
+const db = require('../config/database');
+const { authenticateToken } = require('../utils/authMiddleware');
+
+// Protected route - Get all reservations (admin only)
+router.get('/admin/reservations', authenticateToken, async (req, res) => {
+    // Check if user is admin
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    try {        const [reservations] = await db.execute(`
+            SELECT 
+                r.id,
+                r.full_name,
+                r.age,
+                r.gender,
+                r.email,
+                r.phone,
+                r.goal,
+                r.date,
+                r.time,
+                r.created_at,
+                r.created_by,
+                r.coach_id,
+                c.name as coach_name,
+                c.specialty
+            FROM reservations r
+            JOIN coaches c ON r.coach_id = c.id
+            ORDER BY r.date DESC, r.time DESC
+        `);
+        
+        res.json(reservations);
+    } catch (error) {
+        console.error('Error fetching admin reservations:', error);
+        res.status(500).json({ error: 'Failed to fetch reservations' });
+    }
+});
+
+// Protected route - Get all clients (admin only)
+router.get('/admin/clients', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const [clients] = await db.execute(`
+            SELECT 
+                id,
+                matricule,
+                username,
+                email,
+                role,
+                points,
+                full_name,
+                phone,
+                age,
+                gender,
+                goal,
+                created_at
+            FROM users
+            WHERE role = 'user'
+            ORDER BY username
+        `);
+        
+        res.json(clients);
+    } catch (error) {
+        console.error('Error fetching clients:', error);
+        res.status(500).json({ error: 'Failed to fetch clients' });
+    }
+});
+
+// Protected route - Create a new client (admin only)
+router.post('/admin/clients', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { username, email, password, points, full_name, phone, age, gender, goal } = req.body;
+        
+        // Validate input
+        if (!username || !email || !password) {
+            return res.status(400).json({ error: 'Username, email and password are required' });
+        }
+        
+        // Hash password
+        const bcrypt = require('bcrypt');
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        // Generate matricule using the utility function
+        const { generateMatricule } = require('../utils/matriculeGenerator');
+        const matricule = generateMatricule();
+        
+        // Insert new client with additional fields
+        const [result] = await db.execute(
+            'INSERT INTO users (matricule, username, email, password, role, points, full_name, phone, age, gender, goal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [matricule, username, email, hashedPassword, 'user', points || 0, full_name || null, phone || null, age || null, gender || null, goal || null]
+        );
+        
+        const newClient = {
+            id: result.insertId,
+            matricule,
+            username,
+            email,
+            role: 'user',
+            points: points || 0,
+            full_name: full_name || null,
+            phone: phone || null,
+            age: age || null,
+            gender: gender || null,
+            goal: goal || null
+        };
+        
+        res.status(201).json(newClient);
+    } catch (error) {
+        console.error('Error creating client:', error);
+        
+        // Check for duplicate entry error
+        if (error.code === 'ER_DUP_ENTRY') {
+            if (error.message.includes('username')) {
+                return res.status(400).json({ error: 'Username already exists' });
+            }
+            if (error.message.includes('email')) {
+                return res.status(400).json({ error: 'Email already exists' });
+            }
+            return res.status(400).json({ error: 'Duplicate entry' });
+        }
+        
+        res.status(500).json({ error: 'Failed to create client' });
+    }
+});
+
+// Protected route - Update client points (admin only)
+router.patch('/admin/clients/:id/points', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { points, action } = req.body;
+        
+        // Validate input
+        if (!points || !action) {
+            return res.status(400).json({ error: 'Points value and action (add/set/remove) are required' });
+        }
+        
+        let updateQuery = '';
+        switch (action) {
+            case 'add':
+                updateQuery = 'UPDATE users SET points = points + ? WHERE id = ? AND role = "user"';
+                break;
+            case 'remove':
+                updateQuery = 'UPDATE users SET points = GREATEST(points - ?, 0) WHERE id = ? AND role = "user"';
+                break;
+            case 'set':
+                updateQuery = 'UPDATE users SET points = ? WHERE id = ? AND role = "user"';
+                break;
+            default:
+                return res.status(400).json({ error: 'Invalid action. Use add, remove, or set' });
+        }
+        
+        const [result] = await db.execute(updateQuery, [parseInt(points), id]);
+        
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Client not found' });
+        }
+        
+        // Get updated client
+        const [clients] = await db.execute(
+            'SELECT id, matricule, username, email, role, points FROM users WHERE id = ?',
+            [id]
+        );
+        
+        // Send real-time notification to the user about points update
+        if (global.notifyUser && clients.length > 0) {
+            const client = clients[0];
+            let pointsChange = parseInt(points);
+            let actionText = '';
+            
+            switch (action) {
+                case 'add':
+                    actionText = 'added to';
+                    break;
+                case 'remove':
+                    actionText = 'removed from';
+                    pointsChange = -pointsChange; // Make negative for proper display
+                    break;
+                case 'set':
+                    actionText = 'set to';
+                    pointsChange = client.points; // For 'set', show the final value
+                    break;
+            }
+            
+            global.notifyUser(id, {
+                type: 'points_updated',
+                points: client.points,
+                change: pointsChange,
+                action: action,
+                timestamp: new Date().toISOString(),
+                message: `Your points have been updated by an administrator. ${Math.abs(pointsChange)} points ${actionText} your account. New balance: ${client.points} points.`
+            });
+        }
+        
+        res.json(clients[0]);
+    } catch (error) {
+        console.error('Error updating client points:', error);
+        res.status(500).json({ error: 'Failed to update client points' });
+    }
+});
+
+// Protected route - Delete a client (admin only)
+router.delete('/admin/clients/:id', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Check if client has any reservations
+        const [reservations] = await db.execute('SELECT id FROM reservations WHERE user_id = ?', [id]);
+        
+        if (reservations.length > 0) {
+            // Remove the foreign key constraint for this client first
+            await db.execute('UPDATE reservations SET user_id = NULL WHERE user_id = ?', [id]);
+        }
+        
+        // Now delete the user
+        const [result] = await db.execute('DELETE FROM users WHERE id = ? AND role = "user"', [id]);
+        
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Client not found' });
+        }
+        
+        res.json({ message: 'Client deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting client:', error);
+        res.status(500).json({ error: 'Failed to delete client: ' + error.message });
+    }
+});
+
+// Protected route - Update a client (admin only)
+router.put('/admin/clients/:id', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { username, email, password, points, full_name, phone, age, gender, goal } = req.body;
+        
+        console.log('Updating client with ID:', id);
+        console.log('Received client data:', req.body);
+        
+        // Validate input
+        if (!username || !email) {
+            console.log('Validation failed: Username or email missing');
+            return res.status(400).json({ error: 'Username and email are required' });
+        }
+        
+        // Check if client exists
+        const [clientCheck] = await db.execute('SELECT id FROM users WHERE id = ? AND role = "user"', [id]);
+        if (clientCheck.length === 0) {
+            console.log(`Client with ID ${id} not found`);
+            return res.status(404).json({ error: 'Client not found' });
+        }
+        
+        // Prepare update fields and values
+        let updateQuery = 'UPDATE users SET username = ?, email = ?, points = ?, full_name = ?, phone = ?, age = ?, gender = ?, goal = ?';
+        let params = [
+            username, 
+            email, 
+            points !== undefined ? points : 0, 
+            full_name || null, 
+            phone || null, 
+            age !== undefined && age !== '' ? age : null, 
+            gender || null, 
+            goal || null
+        ];
+        
+        console.log('Processed params for update:', {
+            username,
+            email,
+            points: points !== undefined ? points : 0,
+            full_name: full_name || null,
+            phone: phone || null,
+            age: age !== undefined && age !== '' ? age : null,
+            gender: gender || null,
+            goal: goal || null
+        });
+        
+        // Add password to update if provided
+        if (password) {
+            console.log('Password provided, hashing password for update');
+            const bcrypt = require('bcrypt');
+            const hashedPassword = await bcrypt.hash(password, 10);
+            updateQuery += ', password = ?';
+            params.push(hashedPassword);
+        }
+        
+        // Add WHERE clause
+        updateQuery += ' WHERE id = ?';
+        params.push(id);
+        
+        console.log('Final SQL query:', updateQuery);
+        console.log('Final params (excluding password):', params.filter((p, i) => !password || i !== params.length - 2));
+        
+        // Execute update
+        const [updateResult] = await db.execute(updateQuery, params);
+        console.log('Update result:', updateResult);
+        
+        if (updateResult.affectedRows === 0) {
+            console.log('Update affected 0 rows');
+            return res.status(404).json({ error: 'Client update failed - no rows affected' });
+        }
+        
+        // Get updated client
+        const [updatedClient] = await db.execute(`
+            SELECT 
+                id, matricule, username, email, role, points,
+                full_name, phone, age, gender, goal, created_at
+            FROM users
+            WHERE id = ?
+        `, [id]);
+        
+        if (updatedClient.length === 0) {
+            console.log('Could not find the updated client record');
+            return res.status(404).json({ error: 'Updated client not found' });
+        }
+        
+        console.log('Updated client record:', updatedClient[0]);
+        res.json(updatedClient[0]);
+    } catch (error) {
+        console.error('Error updating client:', error);
+        console.error('Error stack:', error.stack);
+        res.status(500).json({ 
+            error: 'Failed to update client: ' + error.message,
+            details: error.stack
+        });
+    }
+});
+
+// Protected route - Delete a reservation (admin only)
+router.delete('/admin/reservations/:id', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // First get the reservation to check if it exists and to get user data
+        const [reservations] = await db.execute(
+            'SELECT r.id, r.user_id, r.coach_id, u.points as user_points FROM reservations r ' +
+            'LEFT JOIN users u ON r.user_id = u.id ' +
+            'WHERE r.id = ?',
+            [id]
+        );
+        
+        if (reservations.length === 0) {
+            return res.status(404).json({ error: 'Reservation not found' });
+        }
+        
+        const reservation = reservations[0];
+        
+        // Start a transaction
+        const connection = await db.getConnection();
+        await connection.beginTransaction();
+        
+        try {
+            // Delete the reservation
+            const [deleteResult] = await connection.execute(
+                'DELETE FROM reservations WHERE id = ?',
+                [id]
+            );
+            
+            // If the user had points deducted for this reservation, refund them
+            if (reservation.user_id) {
+                // Only refund if the reservation was within the past hour (to prevent abuse)
+                const [timeCheck] = await connection.execute(
+                    'SELECT TIMESTAMPDIFF(MINUTE, created_at, NOW()) as minutes_ago FROM reservations WHERE id = ?', 
+                    [id]
+                );
+                
+                // If the reservation was created within the last hour, refund the points
+                if (timeCheck.length > 0 && timeCheck[0].minutes_ago < 60) {
+                    await connection.execute(
+                        'UPDATE users SET points = points + 30 WHERE id = ?',
+                        [reservation.user_id]
+                    );
+                    
+                    // Send notification to user about refund
+                    if (global.notifyUser) {
+                        global.notifyUser(reservation.user_id, {
+                            type: 'reservation_cancelled',
+                            refunded: true,
+                            points: 30,
+                            timestamp: new Date().toISOString(),
+                            message: 'Your reservation has been cancelled by an administrator. 30 points have been refunded to your account.'
+                        });
+                    }
+                }
+            }
+            
+            await connection.commit();
+            res.json({ 
+                success: true, 
+                message: 'Reservation deleted successfully' 
+            });
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Error deleting reservation:', error);
+        res.status(500).json({ error: 'Failed to delete reservation' });
+    }
+});
+
+// User search endpoint for admin (for assigning packs)
+router.get('/admin/users/search', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { query } = req.query;
+        
+        if (!query || query.trim() === '') {
+            return res.status(400).json({ error: 'Search query is required' });
+        }
+        
+        // Search by username, email, or full name
+        const searchTerm = `%${query}%`;
+        
+        const [users] = await db.execute(`
+            SELECT id, username, email, full_name, points, role
+            FROM users
+            WHERE username LIKE ? OR email LIKE ? OR full_name LIKE ?
+            ORDER BY username
+            LIMIT 20
+        `, [searchTerm, searchTerm, searchTerm]);
+        
+        res.json(users);
+    } catch (error) {
+        console.error('Error searching users:', error);
+        res.status(500).json({ error: 'Failed to search users' });
+    }
+});
+
+module.exports = router;
