@@ -42,12 +42,13 @@ router.get('/reservations', verifyToken, verifyCoach, async (req, res) => {
     }
 });
 
-// Get clients who have booked with this coach
+// Get all unique clients who have made reservations with this coach
 router.get('/clients', verifyToken, verifyCoach, async (req, res) => {
     try {
         const coachId = req.user.coachId;
         
         // Get all unique clients who have made reservations with this coach
+        // Using direct timestamps without timezone conversion
         const [clients] = await db.execute(`
             SELECT DISTINCT 
                 u.id,
@@ -68,9 +69,32 @@ router.get('/clients', verifyToken, verifyCoach, async (req, res) => {
         `, [coachId, coachId]);
         
         res.json(clients);
+        
     } catch (error) {
         console.error('Error fetching coach clients:', error);
         res.status(500).json({ error: 'Failed to fetch clients' });
+    }
+});
+
+// Add a route to check server timezone settings
+router.get('/timezone-check', verifyToken, verifyCoach, async (req, res) => {
+    try {
+        const [timezoneInfo] = await db.execute(`
+            SELECT 
+                NOW() as server_now,
+                @@global.time_zone as global_timezone,
+                @@session.time_zone as session_timezone
+        `);
+        
+        res.json({
+            server_time: timezoneInfo[0],
+            node_time: new Date(),
+            node_timezone: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone
+        });
+        
+    } catch (error) {
+        console.error('Error checking timezone info:', error);
+        res.status(500).json({ error: 'Failed to fetch timezone info' });
     }
 });
 
@@ -102,23 +126,35 @@ router.post('/clients/:clientId/bilan', verifyToken, verifyCoach, async (req, re
         );
         
         if (existingBilan.length > 0) {
-            // Update existing bilan
+            // Update existing bilan - using server's local time
             await db.execute(
                 'UPDATE client_bilans SET bilan = ?, updated_at = NOW() WHERE coach_id = ? AND client_id = ?',
                 [bilan.trim(), coachId, clientId]
+            );
+            
+            // Get the current timestamp directly from MySQL to ensure consistency
+            const [updatedTimestamp] = await db.execute(
+                'SELECT updated_at FROM client_bilans WHERE coach_id = ? AND client_id = ?',
+                [coachId, clientId]
             );
             
             res.json({ 
                 message: 'Bilan updated successfully',
                 client_id: clientId,
                 bilan: bilan.trim(),
-                updated_at: new Date()
+                updated_at: updatedTimestamp[0]?.updated_at || new Date()
             });
         } else {
-            // Create new bilan
+            // Create new bilan - using server's local time
             const [result] = await db.execute(
                 'INSERT INTO client_bilans (coach_id, client_id, bilan) VALUES (?, ?, ?)',
                 [coachId, clientId, bilan.trim()]
+            );
+            
+            // Get the created timestamp directly from MySQL to ensure consistency
+            const [newBilan] = await db.execute(
+                'SELECT created_at FROM client_bilans WHERE id = ?',
+                [result.insertId]
             );
             
             res.status(201).json({ 
@@ -126,7 +162,7 @@ router.post('/clients/:clientId/bilan', verifyToken, verifyCoach, async (req, re
                 bilan_id: result.insertId,
                 client_id: clientId,
                 bilan: bilan.trim(),
-                created_at: new Date()
+                created_at: newBilan[0]?.created_at || new Date()
             });
         }
         

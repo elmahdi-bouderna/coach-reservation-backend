@@ -7,6 +7,7 @@ const pool = mysql.createPool({
     password: process.env.DB_PASSWORD || '',
     database: process.env.DB_NAME || 'coaching_system',
     port: process.env.DB_PORT || 3306,
+    timezone: '+01:00', // Set MySQL connection to use Morocco time (UTC+1)
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0

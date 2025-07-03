@@ -71,20 +71,21 @@ const sendReservationConfirmation = async (reservation) => {
     }
     
     // Format the date and time for email
-    const formattedDate = new Date(reservation.date).toLocaleDateString('en-US', {
+    const formattedDate = new Date(reservation.date).toLocaleDateString('fr-FR', {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
-      day: 'numeric'
+      day: 'numeric',
+      timeZone: 'Africa/Casablanca' // Use Morocco timezone
     });
     
     // Convert time to readable format (assuming time is in format like "14:00:00")
     const timeParts = reservation.time.split(':');
     const hours = parseInt(timeParts[0]);
     const minutes = timeParts[1];
-    const ampm = hours >= 12 ? 'PM' : 'AM';
-    const formattedHours = hours % 12 || 12;
-    const formattedTime = `${formattedHours}:${minutes} ${ampm}`;
+    
+    // Format time using Morocco standards (24-hour format)
+    const formattedTime = `${hours}:${minutes}`;
     
     // Email content
     const mailOptions = {
@@ -165,20 +166,21 @@ const sendCoachNotification = async (reservation, coachEmail) => {
     }
     
     // Format the date and time for email
-    const formattedDate = new Date(reservation.date).toLocaleDateString('en-US', {
+    const formattedDate = new Date(reservation.date).toLocaleDateString('fr-FR', {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
-      day: 'numeric'
+      day: 'numeric',
+      timeZone: 'Africa/Casablanca' // Use Morocco timezone
     });
     
     // Convert time to readable format
     const timeParts = reservation.time.split(':');
     const hours = parseInt(timeParts[0]);
     const minutes = timeParts[1];
-    const ampm = hours >= 12 ? 'PM' : 'AM';
-    const formattedHours = hours % 12 || 12;
-    const formattedTime = `${formattedHours}:${minutes} ${ampm}`;
+    
+    // Format time using Morocco standards (24-hour format)
+    const formattedTime = `${hours}:${minutes}`;
     
     // Email content
     const mailOptions = {
