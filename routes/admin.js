@@ -517,4 +517,189 @@ router.get('/users', verifyToken, verifyAdmin, async (req, res) => {
     }
 });
 
+// Admin route - Get all clients with their bilan information
+router.get('/admin/clients-with-bilans', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const [clients] = await db.execute(`
+            SELECT 
+                u.id,
+                u.matricule,
+                u.username,
+                u.email,
+                u.role,
+                u.points,
+                u.solo_points,
+                u.team_points,
+                u.full_name,
+                u.phone,
+                u.age,
+                u.gender,
+                u.goal,
+                u.created_at,
+                COUNT(DISTINCT r.id) as total_reservations,
+                COUNT(DISTINCT cb.id) as total_bilans,
+                GROUP_CONCAT(
+                    DISTINCT CONCAT(
+                        c.name, ':', 
+                        COALESCE(cb.bilan, 'No bilan'), ':', 
+                        COALESCE(cb.updated_at, cb.created_at, 'Never')
+                    ) 
+                    SEPARATOR '|||'
+                ) as coach_bilans
+            FROM users u
+            LEFT JOIN reservations r ON u.id = r.user_id
+            LEFT JOIN client_bilans cb ON u.id = cb.client_id
+            LEFT JOIN coaches c ON cb.coach_id = c.id
+            WHERE u.role = 'user'
+            GROUP BY u.id, u.matricule, u.username, u.email, u.role, u.points, u.solo_points, u.team_points, u.full_name, u.phone, u.age, u.gender, u.goal, u.created_at
+            ORDER BY u.created_at DESC
+        `);
+        
+        // Process the coach_bilans data to make it more usable
+        const processedClients = clients.map(client => {
+            const bilans = [];
+            if (client.coach_bilans) {
+                const bilanParts = client.coach_bilans.split('|||');
+                bilanParts.forEach(part => {
+                    const [coachName, bilanText, updatedAt] = part.split(':');
+                    if (coachName && bilanText !== 'No bilan') {
+                        bilans.push({
+                            coach_name: coachName,
+                            bilan: bilanText,
+                            updated_at: updatedAt !== 'Never' ? updatedAt : null
+                        });
+                    }
+                });
+            }
+            
+            return {
+                ...client,
+                bilans: bilans,
+                coach_bilans: undefined // Remove the raw data
+            };
+        });
+        
+        res.json(processedClients);
+    } catch (error) {
+        console.error('Error fetching clients with bilans:', error);
+        res.status(500).json({ error: 'Failed to fetch clients with bilans' });
+    }
+});
+
+// Admin route - Get all coaches for bilan assignment
+router.get('/admin/coaches-list', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const [coaches] = await db.execute(`
+            SELECT 
+                c.id,
+                c.name,
+                c.specialty,
+                u.email
+            FROM coaches c
+            JOIN users u ON c.user_id = u.id
+            WHERE u.role = 'coach'
+            ORDER BY c.name ASC
+        `);
+        
+        res.json(coaches);
+    } catch (error) {
+        console.error('Error fetching coaches list:', error);
+        res.status(500).json({ error: 'Failed to fetch coaches' });
+    }
+});
+
+// Admin route - Add/Update client bilan for a specific coach
+router.post('/admin/clients/:clientId/bilan/:coachId', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const clientId = req.params.clientId;
+        const coachId = req.params.coachId;
+        const { bilan } = req.body;
+        
+        if (!bilan || bilan.trim() === '') {
+            return res.status(400).json({ error: 'Bilan content is required' });
+        }
+        
+        // Verify that the client and coach exist
+        const [client] = await db.execute('SELECT id FROM users WHERE id = ? AND role = "user"', [clientId]);
+        const [coach] = await db.execute('SELECT id FROM coaches WHERE id = ?', [coachId]);
+        
+        if (client.length === 0) {
+            return res.status(404).json({ error: 'Client not found' });
+        }
+        
+        if (coach.length === 0) {
+            return res.status(404).json({ error: 'Coach not found' });
+        }
+        
+        // Check if bilan already exists
+        const [existingBilan] = await db.execute(
+            'SELECT * FROM client_bilans WHERE coach_id = ? AND client_id = ?',
+            [coachId, clientId]
+        );
+        
+        if (existingBilan.length > 0) {
+            // Update existing bilan
+            await db.execute(
+                'UPDATE client_bilans SET bilan = ?, updated_at = NOW() WHERE coach_id = ? AND client_id = ?',
+                [bilan.trim(), coachId, clientId]
+            );
+            
+            res.json({ 
+                message: 'Bilan updated successfully',
+                client_id: clientId,
+                coach_id: coachId,
+                bilan: bilan.trim(),
+                updated_at: new Date()
+            });
+        } else {
+            // Create new bilan
+            const [result] = await db.execute(
+                'INSERT INTO client_bilans (coach_id, client_id, bilan) VALUES (?, ?, ?)',
+                [coachId, clientId, bilan.trim()]
+            );
+            
+            res.status(201).json({ 
+                message: 'Bilan created successfully',
+                bilan_id: result.insertId,
+                client_id: clientId,
+                coach_id: coachId,
+                bilan: bilan.trim(),
+                created_at: new Date()
+            });
+        }
+        
+    } catch (error) {
+        console.error('Error adding/updating client bilan:', error);
+        res.status(500).json({ error: 'Failed to save bilan' });
+    }
+});
+
+// Admin route - Delete client bilan
+router.delete('/admin/clients/:clientId/bilan/:coachId', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const clientId = req.params.clientId;
+        const coachId = req.params.coachId;
+        
+        // Delete the bilan
+        const [result] = await db.execute(
+            'DELETE FROM client_bilans WHERE coach_id = ? AND client_id = ?',
+            [coachId, clientId]
+        );
+        
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Bilan not found' });
+        }
+        
+        res.json({ 
+            message: 'Bilan deleted successfully',
+            client_id: clientId,
+            coach_id: coachId
+        });
+        
+    } catch (error) {
+        console.error('Error deleting client bilan:', error);
+        res.status(500).json({ error: 'Failed to delete bilan' });
+    }
+});
+
 module.exports = router;

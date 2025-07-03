@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const { sendReservationConfirmation, sendCoachNotification } = require('../utils/emailService');
+const { markOverlappingSlots, freeOverlappingSlots } = require('../utils/availabilityHelpers');
 
 // Create a new reservation
 router.post('/reserve', async (req, res) => {
@@ -156,15 +157,31 @@ router.post('/reserve', async (req, res) => {
             ];
         }
 
+        // Get the selected slot's details
+        const [selectedSlot] = await connection.execute(`
+            SELECT start_time, end_time
+            FROM coach_availability 
+            WHERE coach_id = ? AND date = ? AND start_time = ?
+        `, [coach_id, date, time]);
+
+        if (selectedSlot.length === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ error: 'Selected time slot not found' });
+        }
+
         // Create the reservation
         const [reservationResult] = await connection.execute(reservationData, params);
 
-        // Mark the slot as booked
-        await connection.execute(`
-            UPDATE coach_availability 
-            SET is_booked = 1 
-            WHERE coach_id = ? AND date = ? AND start_time = ?
-        `, [coach_id, date, time]);
+        // Mark the selected slot and any overlapping slots as booked
+        const overlappingSlotsCount = await markOverlappingSlots(
+            connection,
+            coach_id,
+            date,
+            selectedSlot[0].start_time,
+            selectedSlot[0].end_time,
+            reservationResult.insertId  // Pass the reservation ID
+        );
 
         // Get updated points if user_id is provided
         let updatedPoints = null;
@@ -273,9 +290,9 @@ router.post('/cancel/:id', async (req, res) => {
         
         console.log(`Processing cancellation for reservation ${reservationId}, refund points: ${refundPoints}`);
         
-        // First, get the reservation details
+        // First, get the reservation details with slot times
         const [reservationData] = await connection.execute(`
-            SELECT r.*, ca.id as availability_id 
+            SELECT r.*, ca.id as availability_id, ca.start_time, ca.end_time 
             FROM reservations r
             JOIN coach_availability ca ON r.coach_id = ca.coach_id AND r.date = ca.date AND r.time = ca.start_time
             WHERE r.id = ?
@@ -304,7 +321,7 @@ router.post('/cancel/:id', async (req, res) => {
             });
         }
         
-        // Check if the slot is already free (should not happen, but let's be safe)
+        // Check if the slot exists and is booked
         const [availabilityCheck] = await connection.execute(`
             SELECT is_booked FROM coach_availability 
             WHERE id = ?
@@ -321,15 +338,18 @@ router.post('/cancel/:id', async (req, res) => {
             connection.release();
             return res.status(400).json({ error: 'This time slot is not currently booked' });
         }
+
+        // Mark all overlapping slots as available
+        const freedSlotsCount = await freeOverlappingSlots(
+            connection,
+            reservation.coach_id,
+            reservation.date,
+            reservation.start_time,
+            reservation.end_time,
+            true // this is the admin cancellation endpoint
+        );
         
-        // Mark the slot as available again
-        await connection.execute(`
-            UPDATE coach_availability 
-            SET is_booked = 0 
-            WHERE id = ?
-        `, [reservation.availability_id]);
-        
-        console.log(`Marked availability slot ${reservation.availability_id} as available`);
+        console.log(`Freed ${freedSlotsCount} overlapping availability slots`);
         
         // If we need to refund points and there is a user associated with this reservation
         if (refundPoints && reservation.user_id) {
@@ -475,9 +495,9 @@ router.post('/reservations/client/cancel/:id', async (req, res) => {
         
         console.log(`Processing client cancellation for reservation ${reservationId} by user ${userId}`);
         
-        // First, get the reservation details
+        // First, get the reservation details with slot times
         const [reservationData] = await connection.execute(`
-            SELECT r.*, ca.id as availability_id 
+            SELECT r.*, ca.id as availability_id, ca.start_time, ca.end_time 
             FROM reservations r
             JOIN coach_availability ca ON r.coach_id = ca.coach_id AND r.date = ca.date AND r.time = ca.start_time
             WHERE r.id = ? AND r.user_id = ?
@@ -525,9 +545,9 @@ router.post('/reservations/client/cancel/:id', async (req, res) => {
             });
         }
         
-        // Check if the slot is already free (should not happen, but let's be safe)
+        // Check if the slot exists and is booked
         const [availabilityCheck] = await connection.execute(`
-            SELECT is_booked FROM coach_availability 
+            SELECT is_booked, start_time, end_time FROM coach_availability 
             WHERE id = ?
         `, [reservation.availability_id]);
         
@@ -542,13 +562,19 @@ router.post('/reservations/client/cancel/:id', async (req, res) => {
             connection.release();
             return res.status(400).json({ error: 'This time slot is not currently booked' });
         }
+
+        // Mark all overlapping slots as available again
+        // For admin cancellations, pass isAdmin=true to handle past slots differently
+        const freedSlotsCount = await freeOverlappingSlots(
+            connection,
+            reservation.coach_id,
+            reservation.date,
+            availabilityCheck[0].start_time,
+            availabilityCheck[0].end_time,
+            true // this is the admin cancellation endpoint
+        );
         
-        // Mark the slot as available again
-        await connection.execute(`
-            UPDATE coach_availability 
-            SET is_booked = 0 
-            WHERE id = ?
-        `, [reservation.availability_id]);
+        console.log(`Freed ${freedSlotsCount} overlapping availability slots`);
         
         console.log(`Marked availability slot ${reservation.availability_id} as available`);
         

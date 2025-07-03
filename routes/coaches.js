@@ -31,16 +31,15 @@ router.get('/:id/availability', async (req, res) => {
         
         console.log(`Coach: ${coachName} (ID: ${coachId})`);
         
-        // Get current date and time - ensure we're working with the correct date
+        // Get current date and time
         const now = new Date();
-        // Force current date to June 30, 2025 to match context
-        const currentDate = '2025-06-30'; // YYYY-MM-DD format for database comparison
+        const currentDate = now.toISOString().split('T')[0]; // YYYY-MM-DD format
         const currentTime = now.toTimeString().split(' ')[0].substring(0, 8); // HH:MM:SS
         
-        console.log(`Current date (forced): ${currentDate}, Current time: ${currentTime}`);
+        console.log(`Current date: ${currentDate}, Current time: ${currentTime}`);
         
         // Only show available slots that are in the future (not in the past)
-        // Use direct comparison with UTC date strings  
+        // Filter out slots that are on past dates OR on today but past the current time
         const [availability] = await db.execute(`
             SELECT 
                 ca.id, 
@@ -54,16 +53,19 @@ router.get('/:id/availability', async (req, res) => {
             JOIN coaches c ON ca.coach_id = c.id
             WHERE ca.coach_id = ? 
             AND ca.is_booked = 0
-            AND ca.date > STR_TO_DATE(?, '%Y-%m-%d')
+            AND (
+                ca.date > ? 
+                OR (ca.date = ? AND ca.start_time > ?)
+            )
             ORDER BY ca.date, ca.start_time
-        `, [coachId, currentDate]);
+        `, [coachId, currentDate, currentDate, currentTime]);
         
-        console.log(`Found ${availability.length} available slots for coach ${coachId} (no date filtering)`);
+        console.log(`Found ${availability.length} available future slots for coach ${coachId} (filtered past slots)`);
         
         if (availability.length === 0) {
-            console.log('No available time slots found for this coach at all');
+            console.log('No available future time slots found for this coach');
         } else {
-            console.log('Available slots for this coach:');
+            console.log('Available future slots for this coach:');
             availability.forEach(slot => {
                 console.log(`- ${slot.date} ${slot.start_time}-${slot.end_time} (ID: ${slot.id})`);
             });
@@ -87,10 +89,12 @@ router.get('/:id/all-availability', async (req, res) => {
         
         // Get current date and time for checking past slots
         const now = new Date();
-        const currentDate = '2025-06-30'; // Force current date to match context
+        const currentDate = now.toISOString().split('T')[0]; // YYYY-MM-DD format
         const currentTime = now.toTimeString().split(' ')[0].substring(0, 8); // HH:MM:SS
         
-        // Get all slots but add a "is_past" flag using DATE() function for proper comparison
+        console.log(`Current date: ${currentDate}, Current time: ${currentTime}`);
+        
+        // Get all slots but add a "is_past" flag for proper comparison
         const [availability] = await db.execute(`
             SELECT 
                 ca.id, 
@@ -100,8 +104,8 @@ router.get('/:id/all-availability', async (req, res) => {
                 ca.end_time, 
                 ca.is_booked,
                 CASE 
-                    WHEN DATE(ca.date) < ? THEN 1
-                    WHEN DATE(ca.date) = ? AND ca.start_time < ? THEN 1
+                    WHEN ca.date < ? THEN 1
+                    WHEN ca.date = ? AND ca.start_time < ? THEN 1
                     ELSE 0
                 END as is_past
             FROM coach_availability ca
@@ -230,12 +234,15 @@ router.post('/', async (req, res) => {
 
 // Add availability for a coach
 router.post('/:id/availability', async (req, res) => {
+    const connection = await db.getConnection();
+    
     try {
         const coachId = req.params.id;
         const { date, start_time, end_time } = req.body;
         
         // Validate required fields
         if (!date || !start_time || !end_time) {
+            connection.release();
             return res.status(400).json({ error: 'Date, start time, and end time are required' });
         }
         
@@ -245,24 +252,86 @@ router.post('/:id/availability', async (req, res) => {
         const currentTime = now.toTimeString().split(' ')[0].substring(0, 8); // HH:MM:SS
         
         if (date < currentDate || (date === currentDate && start_time < currentTime)) {
+            connection.release();
             return res.status(400).json({ 
                 error: 'Cannot add availability in the past. Please select a future date and time.'
             });
         }
+
+        await connection.beginTransaction();
+
+        const slots = [];
+        const startDateTime = new Date(`${date}T${start_time}`);
+        const endDateTime = new Date(`${date}T${end_time}`);
+        const SLOT_DURATION = 55; // minutes
+
+        // Generate regular slots (starting on the hour)
+        let currentSlot = new Date(startDateTime);
+        while (currentSlot < endDateTime) {
+            const potentialEndSlot = new Date(currentSlot.getTime() + SLOT_DURATION * 60000);
+            // Only add the slot if it ends before or at the specified end time
+            if (potentialEndSlot <= endDateTime) {
+                const slotStart = currentSlot.toTimeString().slice(0, 8);
+                const slotEnd = potentialEndSlot.toTimeString().slice(0, 8);
+
+                slots.push({
+                    start: slotStart,
+                    end: slotEnd,
+                    isDerived: false
+                });
+            }
+
+            // Move to next hour
+            currentSlot.setHours(currentSlot.getHours() + 1);
+            currentSlot.setMinutes(0);
+        }
+
+        // Generate half-hour slots
+        currentSlot = new Date(startDateTime);
+        currentSlot.setMinutes(30); // Start at half past
+        while (currentSlot < endDateTime) {
+            const potentialEndSlot = new Date(currentSlot.getTime() + SLOT_DURATION * 60000);
+            // Only add the slot if it ends before or at the specified end time
+            if (potentialEndSlot <= endDateTime) {
+                const slotStart = currentSlot.toTimeString().slice(0, 8);
+                const slotEnd = potentialEndSlot.toTimeString().slice(0, 8);
+
+                slots.push({
+                    start: slotStart,
+                    end: slotEnd,
+                    isDerived: true
+                });
+            }
+
+            // Move to next hour
+            currentSlot.setHours(currentSlot.getHours() + 1);
+            currentSlot.setMinutes(30);
+        }
+
+        // Insert all slots
+        const createdSlots = [];
+        for (const slot of slots) {
+            const [result] = await connection.execute(
+                'INSERT INTO coach_availability (coach_id, date, start_time, end_time, duration, is_derived) VALUES (?, ?, ?, ?, ?, ?)',
+                [coachId, date, slot.start, slot.end, SLOT_DURATION, slot.isDerived]
+            );
+
+            createdSlots.push({ 
+                id: result.insertId,
+                coach_id: coachId,
+                date,
+                start_time: slot.start,
+                end_time: slot.end,
+                is_booked: 0,
+                is_derived: slot.isDerived,
+                duration: SLOT_DURATION
+            });
+        }
+
+        await connection.commit();
+        connection.release();
         
-        const [result] = await db.execute(
-            'INSERT INTO coach_availability (coach_id, date, start_time, end_time) VALUES (?, ?, ?, ?)',
-            [coachId, date, start_time, end_time]
-        );
-        
-        res.status(201).json({ 
-            id: result.insertId, 
-            coach_id: coachId, 
-            date, 
-            start_time, 
-            end_time, 
-            is_booked: 0
-        });
+        res.status(201).json(createdSlots);
     } catch (error) {
         console.error('Error adding availability:', error);
         res.status(500).json({ error: 'Failed to add availability' });
