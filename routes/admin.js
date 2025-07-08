@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const { verifyToken, verifyAdmin } = require('./auth');
+const { markOverlappingSlots, freeOverlappingSlots } = require('../utils/availabilityHelpers');
 
 // Protected route - Get all reservations (admin only)
 router.get('/admin/reservations', verifyToken, verifyAdmin, async (req, res) => {
@@ -414,15 +415,34 @@ router.post('/cancel/:id', verifyToken, verifyAdmin, async (req, res) => {
             connection.release();
             return res.status(400).json({ error: 'This time slot is not currently booked' });
         }
-        
-        // Mark the slot as available again
+          // Mark the slot as available again
         await connection.execute(`
             UPDATE coach_availability 
             SET is_booked = 0 
             WHERE id = ?
         `, [reservation.availability_id]);
-        
+
         console.log(`Marked availability slot ${reservation.availability_id} as available`);
+
+        // Get the time slot details to free overlapping slots
+        const [slotDetails] = await connection.execute(`
+            SELECT start_time, end_time FROM coach_availability 
+            WHERE id = ?
+        `, [reservation.availability_id]);
+
+        if (slotDetails.length > 0) {
+            // Mark all overlapping slots as available
+            const freedSlotsCount = await freeOverlappingSlots(
+                connection,
+                reservation.coach_id,
+                reservation.date,
+                slotDetails[0].start_time,
+                slotDetails[0].end_time,
+                true // this is the admin cancellation endpoint
+            );
+            
+            console.log(`Freed ${freedSlotsCount} overlapping availability slots`);
+        }
         
         // If we need to refund points and there is a user associated with this reservation
         if (refundPoints && reservation.user_id) {
@@ -699,6 +719,381 @@ router.delete('/admin/clients/:clientId/bilan/:coachId', verifyToken, verifyAdmi
     } catch (error) {
         console.error('Error deleting client bilan:', error);
         res.status(500).json({ error: 'Failed to delete bilan' });
+    }
+});
+
+// Protected route - Get availability for planning view (admin only)
+router.get('/admin/planning/availability', async (req, res) => {
+    try {
+        const { start_date, end_date } = req.query;
+        
+        console.log('Fetching availability for dates:', start_date, 'to', end_date);
+        
+        // First get all coaches to ensure we return data for all coaches
+        const [coaches] = await db.execute(`
+            SELECT 
+                id,
+                name,
+                specialty,
+                photo as profile_image,
+                email,
+                bio
+            FROM coaches
+            ORDER BY name
+        `);
+        
+        let query = `
+            SELECT 
+                ca.id,
+                ca.coach_id,
+                DATE_FORMAT(ca.date, '%Y-%m-%d') as date,
+                TIME_FORMAT(ca.start_time, '%H:%i') as start_time,
+                TIME_FORMAT(ca.end_time, '%H:%i') as end_time,
+                CASE WHEN ca.is_booked = 1 THEN 0 ELSE 1 END as is_available,
+                c.name as coach_name,
+                c.photo as profile_image,
+                c.specialty
+            FROM coach_availability ca
+            JOIN coaches c ON ca.coach_id = c.id
+            WHERE 1=1
+        `;
+        
+        const params = [];
+        
+        if (start_date && end_date) {
+            query += ` AND ca.date BETWEEN ? AND ?`;
+            params.push(start_date, end_date);
+        }
+        
+        query += ` ORDER BY c.name, ca.date, ca.start_time`;
+        
+        const [availability] = await db.execute(query, params);
+        
+        console.log(`Found ${availability.length} availability slots for date range ${start_date} to ${end_date}`);
+        
+        // If there's no data, return empty array with clear message
+        if (availability.length === 0) {
+            console.log('No availability data found for the selected date range');
+        }
+        
+        res.json(availability);
+    } catch (error) {
+        console.error('Error fetching planning availability:', error);
+        res.status(500).json({ error: 'Failed to fetch availability', details: error.message });
+    }
+});
+
+// Protected route - Get reservations for planning view (admin only)
+router.get('/admin/planning/reservations', async (req, res) => {
+    try {
+        const { start_date, end_date } = req.query;
+        
+        console.log('Fetching reservations for dates:', start_date, 'to', end_date);
+        
+        let query = `
+            SELECT 
+                r.id,
+                r.coach_id,
+                DATE_FORMAT(r.date, '%Y-%m-%d') as date,
+                TIME_FORMAT(r.time, '%H:%i') as time,
+                r.status,
+                r.full_name as client_name,
+                r.email as client_email,
+                r.phone as client_phone,
+                r.created_at,
+                c.name as coach_name,
+                c.photo as profile_image,
+                ca.id as availability_id,
+                TIME_FORMAT(ca.start_time, '%H:%i') as start_time,
+                TIME_FORMAT(ca.end_time, '%H:%i') as end_time
+            FROM reservations r
+            JOIN coaches c ON r.coach_id = c.id
+            LEFT JOIN coach_availability ca ON ca.coach_id = r.coach_id 
+                AND DATE(ca.date) = DATE(r.date) 
+                AND TIME(ca.start_time) = TIME(r.time)
+            WHERE r.status IN ('confirmed', 'pending')
+        `;
+        
+        const params = [];
+        
+        if (start_date && end_date) {
+            query += ` AND r.date BETWEEN ? AND ?`;
+            params.push(start_date, end_date);
+        }
+        
+        query += ` ORDER BY c.name, r.date, r.time`;
+        
+        const [reservations] = await db.execute(query, params);
+        
+        console.log(`Found ${reservations.length} reservations for date range ${start_date} to ${end_date}`);
+        
+        // If there's no data, return empty array with clear message
+        if (reservations.length === 0) {
+            console.log('No reservation data found for the selected date range');
+        }
+        
+        res.json(reservations);
+    } catch (error) {
+        console.error('Error fetching planning reservations:', error);
+        res.status(500).json({ error: 'Failed to fetch reservations', details: error.message });
+    }
+});
+
+// Get all coaches for the planning view
+router.get('/coaches', async (req, res) => {
+    try {
+        console.log('Fetching all coaches');
+        
+        const [coaches] = await db.execute(`
+            SELECT 
+                id,
+                name,
+                specialty,
+                photo,
+                email,
+                bio
+            FROM coaches
+            ORDER BY name
+        `);
+        
+        // Map the results to include both photo and profile_image for compatibility
+        const mappedCoaches = coaches.map(coach => ({
+            ...coach,
+            profile_image: coach.photo // Ensure profile_image is available
+        }));
+        
+        console.log(`Found ${mappedCoaches.length} coaches`);
+        console.log('Coaches data:', mappedCoaches);
+        res.json(mappedCoaches);
+    } catch (error) {
+        console.error('Error fetching coaches:', error);
+        res.status(500).json({ error: 'Failed to fetch coaches' });
+    }
+});
+
+// Bulk create reservations for a client
+router.post('/admin/bulk-reservations', verifyToken, verifyAdmin, async (req, res) => {
+    console.log('=== BULK RESERVATION CREATION REQUEST ===');
+    console.log('Request body:', req.body);
+    
+    const connection = await db.getConnection();
+    
+    try {
+        const { 
+            client_id, 
+            coach_id, 
+            start_date, 
+            end_date, 
+            time_slot, 
+            days_of_week, 
+            repeat_for_weeks 
+        } = req.body;
+        
+        // Validate required fields
+        if (!client_id || !coach_id || !start_date || !end_date || !time_slot || !days_of_week || days_of_week.length === 0) {
+            connection.release();
+            return res.status(400).json({ 
+                error: 'Client ID, coach ID, date range, time slot, and days of week are required' 
+            });
+        }
+        
+        // Validate that end_date is after start_date
+        if (new Date(end_date) < new Date(start_date)) {
+            connection.release();
+            return res.status(400).json({ 
+                error: 'End date must be after start date' 
+            });
+        }
+        
+        // Check if dates are in the past
+        const now = new Date();
+        const currentDateStr = now.toISOString().split('T')[0];
+        
+        if (start_date < currentDateStr) {
+            connection.release();
+            return res.status(400).json({ 
+                error: 'Cannot create reservations in the past. Please select future dates.'
+            });
+        }
+
+        await connection.beginTransaction();
+
+        // Get client details and check points
+        const [clientData] = await connection.execute(`
+            SELECT full_name, email, phone, age, gender, goal, points, solo_points, team_points 
+            FROM users WHERE id = ?
+        `, [client_id]);
+        
+        if (clientData.length === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(404).json({ error: 'Client not found' });
+        }
+        
+        const client = clientData[0];
+        
+        // Get coach details
+        const [coachData] = await connection.execute(`
+            SELECT name, email FROM coaches WHERE id = ?
+        `, [coach_id]);
+        
+        if (coachData.length === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(404).json({ error: 'Coach not found' });
+        }
+        
+        const coach = coachData[0];
+
+        const createdReservations = [];
+        const skippedSlots = [];
+        let clientPoints = client.solo_points;
+        
+        // Calculate the end date based on repeat_for_weeks
+        const startDateObj = new Date(start_date);
+        const endDateObj = new Date(end_date);
+        const finalEndDate = new Date(startDateObj);
+        finalEndDate.setDate(finalEndDate.getDate() + (repeat_for_weeks * 7));
+        
+        // Use the smaller of the provided end_date or calculated final end date
+        const actualEndDate = endDateObj < finalEndDate ? endDateObj : finalEndDate;
+        
+        // Iterate through each day in the date range
+        let iterationDate = new Date(startDateObj);
+        
+        while (iterationDate <= actualEndDate) {
+            const dayOfWeek = iterationDate.getDay(); // 0 = Sunday, 1 = Monday, etc.
+            
+            // Check if this day is in our selected days_of_week
+            if (days_of_week.includes(dayOfWeek)) {
+                const dateStr = iterationDate.toISOString().split('T')[0];
+                
+                // Skip if this date is in the past
+                if (dateStr >= currentDateStr) {
+                    // Check if client has enough solo points
+                    if (clientPoints < 1) {
+                        console.log(`Client ${client_id} ran out of solo points. Stopping bulk creation.`);
+                        break;
+                    }
+                    
+                    // Check if the time slot exists and is available for this coach on this date
+                    const [availabilityCheck] = await connection.execute(`
+                        SELECT id, start_time, end_time FROM coach_availability 
+                        WHERE coach_id = ? AND date = ? AND start_time = ? AND is_booked = 0
+                    `, [coach_id, dateStr, time_slot]);
+                    
+                    if (availabilityCheck.length > 0) {
+                        // Slot exists and is available, create the reservation
+                        try {
+                            const selectedSlot = availabilityCheck[0];
+                            
+                            // Create the reservation
+                            const [reservationResult] = await connection.execute(`
+                                INSERT INTO reservations (coach_id, full_name, email, phone, age, gender, goal, date, time, created_by, user_id, status, reservation_type)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin', ?, 'confirmed', 'individual')
+                            `, [
+                                coach_id, 
+                                client.full_name, 
+                                client.email, 
+                                client.phone, 
+                                client.age, 
+                                client.gender, 
+                                client.goal, 
+                                dateStr, 
+                                time_slot,
+                                client_id
+                            ]);
+                            
+                            // Mark the selected slot and any overlapping slots as booked
+                            const overlappingSlotsCount = await markOverlappingSlots(
+                                connection,
+                                coach_id,
+                                dateStr,
+                                selectedSlot.start_time,
+                                selectedSlot.end_time,
+                                reservationResult.insertId  // Pass the reservation ID
+                            );
+                            
+                            // Deduct solo points from client
+                            await connection.execute(`
+                                UPDATE users 
+                                SET points = points - 1, solo_points = solo_points - 1 
+                                WHERE id = ?
+                            `, [client_id]);
+                            
+                            clientPoints--; // Update our local counter
+                            
+                            createdReservations.push({
+                                id: reservationResult.insertId,
+                                coach_id: parseInt(coach_id),
+                                coach_name: coach.name,
+                                full_name: client.full_name,
+                                email: client.email,
+                                phone: client.phone,
+                                age: client.age,
+                                gender: client.gender,
+                                goal: client.goal,
+                                date: dateStr,
+                                time: time_slot,
+                                status: 'confirmed',
+                                reservation_type: 'individual',
+                                created_at: new Date(),
+                                user_id: parseInt(client_id)
+                            });
+                            
+                            console.log(`Created reservation for ${dateStr} at ${time_slot} (blocked ${overlappingSlotsCount} overlapping slots)`);
+                            
+                        } catch (reservationError) {
+                            console.error(`Failed to create reservation for ${dateStr}:`, reservationError);
+                            skippedSlots.push({
+                                date: dateStr,
+                                time: time_slot,
+                                reason: 'Failed to create reservation'
+                            });
+                        }
+                    } else {
+                        // Slot doesn't exist or is already booked
+                        skippedSlots.push({
+                            date: dateStr,
+                            time: time_slot,
+                            reason: 'Time slot not available or already booked'
+                        });
+                        console.log(`Skipped ${dateStr} at ${time_slot} - slot not available`);
+                    }
+                }
+            }
+            
+            // Move to next day
+            iterationDate.setDate(iterationDate.getDate() + 1);
+        }
+
+        await connection.commit();
+        connection.release();
+        
+        console.log(`Bulk reservation creation completed: ${createdReservations.length} reservations created, ${skippedSlots.length} slots skipped`);
+        
+        res.status(201).json({
+            message: 'Bulk reservations created successfully',
+            reservations: createdReservations,
+            created_count: createdReservations.length,
+            skipped: skippedSlots.length,
+            skipped_details: skippedSlots,
+            client_remaining_points: clientPoints
+        });
+        
+    } catch (error) {
+        try {
+            await connection.rollback();
+        } catch (rollbackError) {
+            console.error('Error during rollback:', rollbackError);
+        }
+        console.error('Error creating bulk reservations:', error);
+        res.status(500).json({ 
+            error: 'Failed to create bulk reservations',
+            message: error.message 
+        });
+    } finally {
+        connection.release();
     }
 });
 

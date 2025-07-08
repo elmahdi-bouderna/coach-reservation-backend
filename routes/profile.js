@@ -55,6 +55,21 @@ router.get('/profile', verifyToken, async (req, res) => {
             WHERE up.user_id = ?
             ORDER BY up.purchased_at DESC
         `, [userId]);
+
+        // Get user's bilans from coaches
+        const [userBilans] = await db.execute(`
+            SELECT 
+                cb.id,
+                cb.bilan,
+                cb.created_at,
+                cb.updated_at,
+                c.name as coach_name,
+                c.specialty as coach_specialty
+            FROM client_bilans cb
+            JOIN coaches c ON cb.coach_id = c.id
+            WHERE cb.client_id = ?
+            ORDER BY cb.updated_at DESC
+        `, [userId]);
         
         // Calculate session statistics
         const totalSessions = reservations.length;
@@ -94,6 +109,17 @@ router.get('/profile', verifyToken, async (req, res) => {
                     price: pack.pack_price,
                     purchased_at: pack.purchased_at,
                     payment_status: pack.payment_status
+                }))
+            },
+            bilans: {
+                total: userBilans.length,
+                list: userBilans.map(bilan => ({
+                    id: bilan.id,
+                    bilan: bilan.bilan,
+                    coach_name: bilan.coach_name,
+                    coach_specialty: bilan.coach_specialty,
+                    created_at: bilan.created_at,
+                    updated_at: bilan.updated_at
                 }))
             },
             statistics: {

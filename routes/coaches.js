@@ -583,4 +583,176 @@ router.delete('/:id', async (req, res) => {
     }
 });
 
+// Bulk create availability for multiple days/weeks
+router.post('/bulk-availability', async (req, res) => {
+    const connection = await db.getConnection();
+    
+    try {
+        const { 
+            coach_id, 
+            start_date, 
+            end_date, 
+            start_time, 
+            end_time, 
+            days_of_week, 
+            repeat_for_weeks 
+        } = req.body;
+        
+        // Validate required fields
+        if (!coach_id || !start_date || !end_date || !start_time || !end_time || !days_of_week || days_of_week.length === 0) {
+            connection.release();
+            return res.status(400).json({ 
+                error: 'Coach ID, date range, time range, and days of week are required' 
+            });
+        }
+        
+        // Validate that end_date is after start_date
+        if (new Date(end_date) < new Date(start_date)) {
+            connection.release();
+            return res.status(400).json({ 
+                error: 'End date must be after start date' 
+            });
+        }
+        
+        // Check if dates are in the past
+        const now = new Date();
+        const currentDateStr = now.toISOString().split('T')[0];
+        const currentTime = now.toTimeString().split(' ')[0].substring(0, 8);
+        
+        if (start_date < currentDateStr) {
+            connection.release();
+            return res.status(400).json({ 
+                error: 'Cannot create availability in the past. Please select future dates.'
+            });
+        }
+
+        await connection.beginTransaction();
+
+        const createdSlots = [];
+        const SLOT_DURATION = 55; // minutes
+        
+        // Calculate the end date based on repeat_for_weeks
+        const startDateObj = new Date(start_date);
+        const endDateObj = new Date(end_date);
+        const finalEndDate = new Date(startDateObj);
+        finalEndDate.setDate(finalEndDate.getDate() + (repeat_for_weeks * 7));
+        
+        // Use the smaller of the provided end_date or calculated final end date
+        const actualEndDate = endDateObj < finalEndDate ? endDateObj : finalEndDate;
+        
+        // Iterate through each day in the date range
+        let iterationDate = new Date(startDateObj);
+        
+        while (iterationDate <= actualEndDate) {
+            const dayOfWeek = iterationDate.getDay(); // 0 = Sunday, 1 = Monday, etc.
+            
+            // Check if this day is in our selected days_of_week
+            if (days_of_week.includes(dayOfWeek)) {
+                const dateStr = iterationDate.toISOString().split('T')[0];
+                
+                // Skip if this date is in the past
+                if (dateStr >= currentDateStr || (dateStr === currentDateStr && start_time >= currentTime)) {
+                    // Generate slots for this day
+                    const slots = [];
+                    const startDateTime = new Date(`${dateStr}T${start_time}`);
+                    const endDateTime = new Date(`${dateStr}T${end_time}`);
+
+                    // Generate regular slots (starting on the hour)
+                    let currentSlot = new Date(startDateTime);
+                    while (currentSlot < endDateTime) {
+                        const potentialEndSlot = new Date(currentSlot.getTime() + SLOT_DURATION * 60000);
+                        // Only add the slot if it ends before or at the specified end time
+                        if (potentialEndSlot <= endDateTime) {
+                            const slotStart = currentSlot.toTimeString().slice(0, 8);
+                            const slotEnd = potentialEndSlot.toTimeString().slice(0, 8);
+
+                            slots.push({
+                                start: slotStart,
+                                end: slotEnd,
+                                isDerived: false
+                            });
+                        }
+
+                        // Move to next hour
+                        currentSlot.setHours(currentSlot.getHours() + 1);
+                        currentSlot.setMinutes(0);
+                    }
+
+                    // Generate half-hour slots
+                    currentSlot = new Date(startDateTime);
+                    currentSlot.setMinutes(30); // Start at half past
+                    while (currentSlot < endDateTime) {
+                        const potentialEndSlot = new Date(currentSlot.getTime() + SLOT_DURATION * 60000);
+                        // Only add the slot if it ends before or at the specified end time
+                        if (potentialEndSlot <= endDateTime) {
+                            const slotStart = currentSlot.toTimeString().slice(0, 8);
+                            const slotEnd = potentialEndSlot.toTimeString().slice(0, 8);
+
+                            slots.push({
+                                start: slotStart,
+                                end: slotEnd,
+                                isDerived: true
+                            });
+                        }
+
+                        // Move to next hour
+                        currentSlot.setHours(currentSlot.getHours() + 1);
+                        currentSlot.setMinutes(30);
+                    }
+
+                    // Insert all slots for this day
+                    for (const slot of slots) {
+                        // Check if slot already exists
+                        const [existingSlot] = await connection.execute(
+                            'SELECT id FROM coach_availability WHERE coach_id = ? AND date = ? AND start_time = ? AND end_time = ?',
+                            [coach_id, dateStr, slot.start, slot.end]
+                        );
+                        
+                        if (existingSlot.length === 0) {
+                            const [result] = await connection.execute(
+                                'INSERT INTO coach_availability (coach_id, date, start_time, end_time, duration, is_derived) VALUES (?, ?, ?, ?, ?, ?)',
+                                [coach_id, dateStr, slot.start, slot.end, SLOT_DURATION, slot.isDerived]
+                            );
+
+                            createdSlots.push({ 
+                                id: result.insertId,
+                                coach_id: parseInt(coach_id),
+                                date: dateStr,
+                                start_time: slot.start,
+                                end_time: slot.end,
+                                is_booked: 0,
+                                is_derived: slot.isDerived,
+                                duration: SLOT_DURATION
+                            });
+                        }
+                    }
+                }
+            }
+            
+            // Move to next day
+            iterationDate.setDate(iterationDate.getDate() + 1);
+        }
+
+        await connection.commit();
+        connection.release();
+        
+        console.log(`Bulk availability created: ${createdSlots.length} slots for coach ${coach_id}`);
+        res.status(201).json(createdSlots);
+        
+    } catch (error) {
+        try {
+            await connection.rollback();
+        } catch (rollbackError) {
+            console.error('Error during rollback:', rollbackError);
+        }
+        console.error('Error creating bulk availability:', error);
+        res.status(500).json({ 
+            error: 'Failed to create bulk availability',
+            message: error.message 
+        });
+    } finally {
+        connection.release();
+    }
+});
+
 module.exports = router;

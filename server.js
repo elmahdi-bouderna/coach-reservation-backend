@@ -98,19 +98,21 @@ const packsRoutes = require('./routes/packs');
 const userPacksRoutes = require('./routes/user-packs');
 const profileRoutes = require('./routes/profile');
 const groupCoursesRoutes = require('./routes/group-courses');
+const adminPaymentsRoutes = require('./routes/admin-payments');
 
 // Mount the routes
 app.use('/api/coaches', coachesRoutes);
 app.use('/api', reservationsRoutes);  // This will handle /api/reserve and /api/reservations
 app.use('/api/coach-dashboard', coachDashboardRoutes); // Routes for coach dashboard
 app.use('/api/auth', authRoutes);
-app.use('/api', adminRoutes);
+app.use('/api', adminRoutes);  // Admin routes are defined with /admin prefix in the router
 app.use('/api', adminPointsRoutes);
 app.use('/api/uploads', uploadsRoutes);
 app.use('/api/packs', packsRoutes);
 app.use('/api/user-packs', userPacksRoutes);
 app.use('/api/user', profileRoutes);
 app.use('/api/group-courses', groupCoursesRoutes);
+app.use('/api', adminPaymentsRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
