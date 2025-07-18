@@ -5,7 +5,7 @@ async function testEndpointAvailability() {
   try {
     // Test server health endpoint first
     console.log('1. Testing server health endpoint...');
-    const healthResponse = await axios.get('https://coach-reservation.onrender.com/api/health');
+    const healthResponse = await axios.get('https://coachreservation-0caad91c51ab.herokuapp.com/api/health');
     console.log('✓ Server health endpoint is working');
     console.log(healthResponse.data);
     
@@ -13,7 +13,7 @@ async function testEndpointAvailability() {
     console.log('\n2. Testing if admin payment endpoints are mounted (expect 401/403 errors)...');
     
     try {
-      await axios.get('https://coach-reservation.onrender.com/api/admin/payments');
+      await axios.get('https://coachreservation-0caad91c51ab.herokuapp.com/api/admin/payments');
       console.log('✓ Admin payments endpoint is mounted (returned data)');
     } catch (error) {
       if (error.response && (error.response.status === 401 || error.response.status === 403)) {
@@ -24,7 +24,7 @@ async function testEndpointAvailability() {
     }
     
     try {
-      await axios.get('https://coach-reservation.onrender.com/api/admin/payments/statistics');
+      await axios.get('https://coachreservation-0caad91c51ab.herokuapp.com/api/admin/payments/statistics');
       console.log('✓ Payment statistics endpoint is mounted (returned data)');
     } catch (error) {
       if (error.response && (error.response.status === 401 || error.response.status === 403)) {

@@ -19,7 +19,7 @@ const token = jwt.sign(
 
 // Configure axios
 const api = axios.create({
-  baseURL: 'https://coach-reservation.onrender.com/api',
+  baseURL: 'https://coachreservation-0caad91c51ab.herokuapp.com/api',
   headers: {
     'Authorization': `Bearer ${token}`,
     'Content-Type': 'application/json'

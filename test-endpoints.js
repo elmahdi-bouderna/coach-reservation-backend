@@ -24,7 +24,7 @@ async function testEndpoints() {
     // Test health endpoint first (no auth required)
     console.log('\n1. Testing health endpoint...');
     try {
-      const healthResponse = await axios.get('https://coach-reservation.onrender.com/api/health');
+      const healthResponse = await axios.get('https://coachreservation-0caad91c51ab.herokuapp.com/api/health');
       console.log('✓ Health endpoint response:', healthResponse.data);
     } catch (error) {
       console.error('✗ Health endpoint error:', error.message);
@@ -32,7 +32,7 @@ async function testEndpoints() {
     
     // Set up axios with auth token
     const api = axios.create({
-      baseURL: 'https://coach-reservation.onrender.com/api',
+      baseURL: 'https://coachreservation-0caad91c51ab.herokuapp.com/api',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json'

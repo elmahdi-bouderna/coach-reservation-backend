@@ -91,32 +91,32 @@ const sendReservationConfirmation = async (reservation) => {
     const mailOptions = {
       from: `"Suite Coaching" <${process.env.EMAIL_USER}>`,
       to: reservation.email,
-      subject: '🏆 Your Coaching Session is Confirmed!',
+      subject: '🏆 Votre séance de coaching est confirmée !',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
           <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #00E5FF;">Your Coaching Session is Confirmed!</h1>
+            <h1 style="color: #00E5FF;">Votre séance de coaching est confirmée !</h1>
           </div>
           
-          <p>Hello <strong>${reservation.full_name}</strong>,</p>
+          <p>Bonjour <strong>${reservation.full_name}</strong>,</p>
           
-          <p>Great news! Your coaching session has been successfully booked. Here are the details:</p>
+          <p>Excellente nouvelle ! Votre séance de coaching a été réservée avec succès. Voici les détails :</p>
           
           <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
-            <p><strong>Coach:</strong> ${reservation.coach_name}</p>
-            <p><strong>Date:</strong> ${formattedDate}</p>
-            <p><strong>Time:</strong> ${formattedTime}</p>
-            <p><strong>Points Used:</strong> 1</p>
-            <p><strong>Remaining Points:</strong> ${reservation.remaining_points}</p>
+            <p><strong>Coach :</strong> ${reservation.coach_name}</p>
+            <p><strong>Date :</strong> ${formattedDate}</p>
+            <p><strong>Heure :</strong> ${formattedTime}</p>
+            <p><strong>Points utilisés :</strong> 1</p>
+            <p><strong>Points restants :</strong> ${reservation.remaining_points}</p>
           </div>
           
-          <p>Please arrive 5 minutes before your scheduled time. If you need to reschedule or cancel, please contact us at least 24 hours in advance.</p>
+          <p>Veuillez arriver 5 minutes avant l'heure prévue. Si vous devez reporter ou annuler, veuillez nous contacter au moins 6 heures à l'avance.</p>
           
-          <p>Looking forward to helping you achieve your goals!</p>
+          <p>Nous avons hâte de vous aider à atteindre vos objectifs !</p>
           
           <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; font-size: 12px; color: #777;">
-            <p>If you have any questions, please reply to this email or call us at +1-234-567-8900.</p>
-            <p>Suite Coaching<br>123 Fitness Street, Health City</p>
+            <p>Si vous avez des questions, veuillez répondre à cet email ou appelez-nous au +212 660-505652.</p>
+            <p>Suite Coaching<br>Lotissement Florida, Bureau N°39, Etage N°5, Imm. Corner Office, Lot 5 Bd Zoulikha Nasri, Casablanca 20000</p>
           </div>
         </div>
       `
@@ -184,30 +184,30 @@ const sendCoachNotification = async (reservation, coachEmail) => {
     
     // Email content
     const mailOptions = {
-      from: `"Suite Coaching System" <${process.env.EMAIL_USER}>`,
+      from: `"Système Suite Coaching" <${process.env.EMAIL_USER}>`,
       to: coachEmail,
-      subject: '🔔 New Coaching Session Booked',
+      subject: '🔔 Nouvelle séance de coaching réservée',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
           <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #00E5FF;">New Session Booked</h1>
+            <h1 style="color: #00E5FF;">Nouvelle séance réservée</h1>
           </div>
           
-          <p>Hello <strong>${reservation.coach_name}</strong>,</p>
+          <p>Bonjour <strong>${reservation.coach_name}</strong>,</p>
 
-          <p>A new coaching session has been booked with you:</p>
+          <p>Une nouvelle séance de coaching a été réservée avec vous :</p>
           
           <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
-            <p><strong>Client:</strong> ${reservation.full_name}</p>
-            <p><strong>Client Email:</strong> ${reservation.email}</p>
-            <p><strong>Date:</strong> ${formattedDate}</p>
-            <p><strong>Time:</strong> ${formattedTime}</p>
+            <p><strong>Client :</strong> ${reservation.full_name}</p>
+            <p><strong>Email du client :</strong> ${reservation.email}</p>
+            <p><strong>Date :</strong> ${formattedDate}</p>
+            <p><strong>Heure :</strong> ${formattedTime}</p>
           </div>
           
-          <p>Please make a note of this appointment in your calendar. If you need to reschedule, please contact the client directly.</p>
+          <p>Veuillez noter ce rendez-vous dans votre calendrier. Si vous devez reporter, veuillez contacter le client directement.</p>
           
           <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; font-size: 12px; color: #777;">
-            <p>This is an automated message from the Suite Coaching booking system.</p>
+            <p>Ceci est un message automatique du système de réservation Suite Coaching.</p>
           </div>
         </div>
       `

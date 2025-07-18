@@ -369,6 +369,70 @@ router.delete('/availability/:id', async (req, res) => {
     }
 });
 
+// Bulk delete coach availability  
+router.post('/availability/bulk-delete', async (req, res) => {
+    const connection = await db.getConnection();
+    
+    try {
+        const { ids } = req.body;
+        
+        // Validate input
+        if (!ids || !Array.isArray(ids) || ids.length === 0) {
+            connection.release();
+            return res.status(400).json({ error: 'Invalid or empty IDs array' });
+        }
+        
+        // Convert IDs to numbers for safety
+        const slotIds = ids.map(id => parseInt(id)).filter(id => !isNaN(id));
+        
+        if (slotIds.length === 0) {
+            connection.release();
+            return res.status(400).json({ error: 'No valid IDs provided' });
+        }
+        
+        await connection.beginTransaction();
+        
+        // Check if any slots are booked - we shouldn't allow deletion of booked slots
+        const placeholders = slotIds.map(() => '?').join(',');
+        const [bookedSlots] = await connection.execute(
+            `SELECT id FROM coach_availability WHERE id IN (${placeholders}) AND is_booked = 1`,
+            slotIds
+        );
+        
+        if (bookedSlots.length > 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ 
+                error: 'Cannot delete booked slots',
+                bookedSlots: bookedSlots.map(slot => slot.id)
+            });
+        }
+        
+        // Delete all the slots
+        const [result] = await connection.execute(
+            `DELETE FROM coach_availability WHERE id IN (${placeholders}) AND is_booked = 0`,
+            slotIds
+        );
+        
+        await connection.commit();
+        connection.release();
+        
+        res.json({ 
+            message: `Successfully deleted ${result.affectedRows} availability slots`,
+            deletedCount: result.affectedRows
+        });
+        
+    } catch (error) {
+        await connection.rollback();
+        connection.release();
+        console.error('Error bulk deleting availability:', error);
+        res.status(500).json({ 
+            error: 'Failed to bulk delete availability',
+            message: error.message
+        });
+    }
+});
+
 // Update a coach
 router.put('/:id', async (req, res) => {
     // Get a connection from the pool for transaction
