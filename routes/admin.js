@@ -3,135 +3,108 @@ const router = express.Router();
 const db = require('../config/database');
 const { verifyToken, verifyAdmin } = require('./auth');
 const { markOverlappingSlots, freeOverlappingSlots } = require('../utils/availabilityHelpers');
+const { asyncHandler } = require('../middleware/databaseErrorHandler');
 
 // Protected route - Get all reservations (admin only)
-router.get('/admin/reservations', verifyToken, verifyAdmin, async (req, res) => {
-    try {        const [reservations] = await db.execute(`
-            SELECT 
-                r.id,
-                r.full_name,
-                r.age,
-                r.gender,
-                r.email,
-                r.phone,
-                r.goal,
-                r.date,
-                r.time,
-                r.created_at,
-                r.created_by,
-                r.coach_id,
-                r.status,
-                r.cancelled_at,
-                r.cancelled_by,
-                r.user_id,
-                c.name as coach_name,
-                c.specialty
-            FROM reservations r
-            JOIN coaches c ON r.coach_id = c.id
-            ORDER BY r.date DESC, r.time DESC
-        `);
-        
-        res.json(reservations);
-    } catch (error) {
-        console.error('Error fetching admin reservations:', error);
-        res.status(500).json({ error: 'Failed to fetch reservations' });
-    }
-});
+router.get('/admin/reservations', verifyToken, verifyAdmin, asyncHandler(async (req, res) => {
+    const [reservations] = await db.execute(`
+        SELECT 
+            r.id,
+            r.full_name,
+            r.age,
+            r.gender,
+            r.email,
+            r.phone,
+            r.goal,
+            r.date,
+            r.time,
+            r.created_at,
+            r.created_by,
+            r.coach_id,
+            r.status,
+            r.cancelled_at,
+            r.cancelled_by,
+            r.user_id,
+            c.name as coach_name,
+            c.specialty
+        FROM reservations r
+        JOIN coaches c ON r.coach_id = c.id
+        ORDER BY r.date DESC, r.time DESC
+    `);
+    
+    res.json(reservations);
+}));
 
 // Protected route - Get all clients (admin only)
-router.get('/admin/clients', verifyToken, verifyAdmin, async (req, res) => {
-    try {
-        const [clients] = await db.execute(`
-            SELECT 
-                id,
-                matricule,
-                username,
-                email,
-                role,
-                points,
-                solo_points,
-                team_points,
-                full_name,
-                phone,
-                age,
-                gender,
-                goal,
-                created_at
-            FROM users
-            WHERE role = 'user'
-            ORDER BY username
-        `);
-        
-        res.json(clients);
-    } catch (error) {
-        console.error('Error fetching clients:', error);
-        res.status(500).json({ error: 'Failed to fetch clients' });
-    }
-});
-
-// Protected route - Create a new client (admin only)
-router.post('/admin/clients', verifyToken, verifyAdmin, async (req, res) => {
-    try {
-        const { username, email, password, points, full_name, phone, age, gender, goal } = req.body;
-        
-        // Validate input
-        if (!username || !email || !password) {
-            return res.status(400).json({ error: 'Username, email and password are required' });
-        }
-        
-        // Hash password
-        const bcrypt = require('bcrypt');
-        const hashedPassword = await bcrypt.hash(password, 10);
-        
-        // Generate matricule using the utility function
-        const { generateMatricule } = require('../utils/matriculeGenerator');
-        const matricule = generateMatricule();
-        
-        // Set up points values (for backward compatibility)
-        const totalPoints = points || 0;
-        const soloPoints = req.body.solo_points !== undefined ? req.body.solo_points : totalPoints;
-        const teamPoints = req.body.team_points !== undefined ? req.body.team_points : 0;
-        
-        // Insert new client with additional fields
-        const [result] = await db.execute(
-            'INSERT INTO users (matricule, username, email, password, role, points, solo_points, team_points, full_name, phone, age, gender, goal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [matricule, username, email, hashedPassword, 'user', totalPoints, soloPoints, teamPoints, full_name || null, phone || null, age || null, gender || null, goal || null]
-        );
-        
-        const newClient = {
-            id: result.insertId,
+router.get('/admin/clients', verifyToken, verifyAdmin, asyncHandler(async (req, res) => {
+    const [clients] = await db.execute(`
+        SELECT 
+            id,
             matricule,
             username,
             email,
-            role: 'user',
-            points: points || 0,
-            solo_points: req.body.solo_points !== undefined ? req.body.solo_points : (points || 0),
-            team_points: req.body.team_points !== undefined ? req.body.team_points : 0,
-            full_name: full_name || null,
-            phone: phone || null,
-            age: age || null,
-            gender: gender || null,
-            goal: goal || null
-        };
-        
-        res.status(201).json(newClient);
-    } catch (error) {
-        console.error('Error creating client:', error);
-        
-        // Check for duplicate entry error
-        if (error.code === 'ER_DUP_ENTRY') {
-            if (error.message.includes('username')) {
-                return res.status(400).json({ error: 'Username already exists' });
-            }
-            if (error.message.includes('email')) {
-                return res.status(400).json({ error: 'Email already exists' });
-            }
-            return res.status(400).json({ error: 'Duplicate entry' });
-        }
-        
-        res.status(500).json({ error: 'Failed to create client' });
+            role,
+            points,
+            solo_points,
+            team_points,
+            full_name,
+            phone,
+            age,
+            gender,
+            goal,
+            created_at
+        FROM users
+        WHERE role = 'user'
+        ORDER BY username
+    `);
+    
+    res.json(clients);
+}));// Protected route - Create a new client (admin only)
+router.post('/admin/clients', verifyToken, verifyAdmin, asyncHandler(async (req, res) => {
+    const { username, email, password, points, full_name, phone, age, gender, goal } = req.body;
+    
+    // Validate input
+    if (!username || !email || !password) {
+        return res.status(400).json({ error: 'Username, email and password are required' });
     }
-});
+    
+    // Hash password
+    const bcrypt = require('bcrypt');
+    const hashedPassword = await bcrypt.hash(password, 10);
+        
+    // Generate matricule using the utility function
+    const { generateMatricule } = require('../utils/matriculeGenerator');
+    const matricule = generateMatricule();
+    
+    // Set up points values (for backward compatibility)
+    const totalPoints = points || 0;
+    const soloPoints = req.body.solo_points !== undefined ? req.body.solo_points : totalPoints;
+    const teamPoints = req.body.team_points !== undefined ? req.body.team_points : 0;
+    
+    // Insert new client with additional fields
+    const [result] = await db.execute(
+        'INSERT INTO users (matricule, username, email, password, role, points, solo_points, team_points, full_name, phone, age, gender, goal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [matricule, username, email, hashedPassword, 'user', totalPoints, soloPoints, teamPoints, full_name || null, phone || null, age || null, gender || null, goal || null]
+    );
+    
+    const newClient = {
+        id: result.insertId,
+        matricule,
+        username,
+        email,
+        role: 'user',
+        points: points || 0,
+        solo_points: req.body.solo_points !== undefined ? req.body.solo_points : (points || 0),
+        team_points: req.body.team_points !== undefined ? req.body.team_points : 0,
+        full_name: full_name || null,
+        phone: phone || null,
+        age: age || null,
+        gender: gender || null,
+        goal: goal || null
+    };
+    
+    res.status(201).json(newClient);
+}));
 
 // Protected route - Update client points (admin only)
 // ROUTE MOVED TO admin-points.js which handles both solo and team points

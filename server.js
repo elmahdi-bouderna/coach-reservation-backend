@@ -3,6 +3,8 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const http = require('http');
 const WebSocket = require('ws');
+const { handleDatabaseError } = require('./middleware/databaseErrorHandler');
+const db = require('./config/database');
 require('dotenv').config();
 
 const app = express();
@@ -72,7 +74,9 @@ global.notifyUser = (userId, data) => {
 app.use(cors({
     origin: [
         'http://localhost:3000',
-        'http://localhost:3001', 
+        'http://localhost:3001',
+        'https://coach-reservation-l1viiu9sm-elmahdi-boudernas-projects.vercel.app/',
+        'https://coach-reservation-git-main-elmahdi-boudernas-projects.vercel.app/',
         'https://coach-reservation.vercel.app',
         'https://fitlek.tech',
         'https://www.fitlek.tech',
@@ -99,8 +103,10 @@ const userPacksRoutes = require('./routes/user-packs');
 const profileRoutes = require('./routes/profile');
 const groupCoursesRoutes = require('./routes/group-courses');
 const adminPaymentsRoutes = require('./routes/admin-payments');
+const healthRoutes = require('./routes/health');
 
 // Mount the routes
+app.use('/api/health', healthRoutes);
 app.use('/api/coaches', coachesRoutes);
 app.use('/api', reservationsRoutes);  // This will handle /api/reserve and /api/reservations
 app.use('/api/coach-dashboard', coachDashboardRoutes); // Routes for coach dashboard
@@ -114,15 +120,26 @@ app.use('/api/user', profileRoutes);
 app.use('/api/group-courses', groupCoursesRoutes);
 app.use('/api', adminPaymentsRoutes);
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'Server is running' });
-});
+// Database error handling middleware (must be before general error handler)
+app.use(handleDatabaseError);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-    console.error(err.stack);
-    res.status(500).json({ error: 'Something went wrong!' });
+    console.error('General error occurred:', {
+        message: err.message,
+        stack: err.stack,
+        url: req.originalUrl,
+        method: req.method,
+        timestamp: new Date().toISOString()
+    });
+    
+    // Don't expose internal errors in production
+    const isDevelopment = process.env.NODE_ENV === 'development';
+    
+    res.status(err.status || 500).json({
+        error: isDevelopment ? err.message : 'Internal server error',
+        ...(isDevelopment && { stack: err.stack })
+    });
 });
 
 // 404 handler
@@ -132,11 +149,27 @@ app.use('*', (req, res) => {
 });
 
 // Start server
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', async () => {
     console.log(`Server is running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`WebSocket server is active on ws://localhost:${PORT}/ws`);
+    
+    // Test database connection on startup
+    try {
+        const isHealthy = await db.healthCheck();
+        if (isHealthy) {
+            console.log('✅ Database connection established successfully');
+        } else {
+            console.log('❌ Database connection failed');
+        }
+    } catch (error) {
+        console.error('❌ Database startup check failed:', error.message);
+    }
+    
     console.log('Available routes:');
+    console.log('- GET /api/health - Health check with database test');
+    console.log('- GET /api/health/database - Database connection test');
+    console.log('- POST /api/health/warm - Warm database connection');
     console.log('- GET /api/coaches');
     console.log('- GET /api/coaches/:id/availability');
     console.log('- GET /api/coaches/:id/all-availability');

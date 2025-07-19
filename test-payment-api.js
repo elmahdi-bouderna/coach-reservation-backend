@@ -19,7 +19,7 @@ const token = jwt.sign(
 
 // Configure axios
 const api = axios.create({
-  baseURL: 'https://coachreservation-0caad91c51ab.herokuapp.com/api',
+  baseURL: 'http://localhost:3000/api',
   headers: {
     'Authorization': `Bearer ${token}`,
     'Content-Type': 'application/json'
