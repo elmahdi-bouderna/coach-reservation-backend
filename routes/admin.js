@@ -4,6 +4,7 @@ const db = require('../config/database');
 const { verifyToken, verifyAdmin } = require('./auth');
 const { markOverlappingSlots, freeOverlappingSlots } = require('../utils/availabilityHelpers');
 const { asyncHandler } = require('../middleware/databaseErrorHandler');
+const { sendBulkReservationConfirmation, sendBulkCoachNotification } = require('../utils/emailService');
 
 // Protected route - Get all reservations (admin only)
 router.get('/admin/reservations', verifyToken, verifyAdmin, asyncHandler(async (req, res) => {
@@ -1045,13 +1046,57 @@ router.post('/admin/bulk-reservations', verifyToken, verifyAdmin, async (req, re
         
         console.log(`Bulk reservation creation completed: ${createdReservations.length} reservations created, ${skippedSlots.length} slots skipped`);
         
+        // Send email notifications if reservations were created
+        if (createdReservations.length > 0) {
+            console.log('Sending bulk reservation email notifications...');
+            
+            // Prepare email data
+            const emailData = {
+                clientName: client.full_name || client.username,
+                clientEmail: client.email,
+                coachName: coach.name,
+                coachEmail: coach.email,
+                startDate: start_date,
+                endDate: end_date,
+                timeSlot: time_slot,
+                daysOfWeek: days_of_week,
+                reservations: createdReservations,
+                remainingPoints: clientPoints
+            };
+            
+            // Send email to client (don't wait for completion to avoid blocking response)
+            sendBulkReservationConfirmation(emailData).then((clientEmailSent) => {
+                if (clientEmailSent) {
+                    console.log('✅ Bulk reservation confirmation email sent to client successfully');
+                } else {
+                    console.log('❌ Failed to send bulk reservation confirmation email to client');
+                }
+            }).catch((error) => {
+                console.error('Error sending bulk reservation confirmation email to client:', error);
+            });
+            
+            // Send email to coach (don't wait for completion to avoid blocking response)
+            sendBulkCoachNotification(emailData).then((coachEmailSent) => {
+                if (coachEmailSent) {
+                    console.log('✅ Bulk reservation notification email sent to coach successfully');
+                } else {
+                    console.log('❌ Failed to send bulk reservation notification email to coach');
+                }
+            }).catch((error) => {
+                console.error('Error sending bulk reservation notification email to coach:', error);
+            });
+            
+            console.log('Email notifications dispatched (processing in background)');
+        }
+        
         res.status(201).json({
             message: 'Bulk reservations created successfully',
             reservations: createdReservations,
             created_count: createdReservations.length,
             skipped: skippedSlots.length,
             skipped_details: skippedSlots,
-            client_remaining_points: clientPoints
+            client_remaining_points: clientPoints,
+            email_notifications: createdReservations.length > 0 ? 'sent' : 'not_applicable'
         });
         
     } catch (error) {

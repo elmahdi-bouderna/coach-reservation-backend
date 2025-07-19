@@ -245,7 +245,307 @@ const sendCoachNotification = async (reservation, coachEmail) => {
   }
 };
 
+// Send bulk reservation confirmation email
+const sendBulkReservationConfirmation = async (bulkData) => {
+  try {
+    console.log(`Preparing to send bulk reservation email to ${bulkData.clientEmail}...`);
+    const emailTransporter = await createTransporter();
+    
+    if (!emailTransporter) {
+      console.error('Email transporter creation failed');
+      return false;
+    }
+    
+    // Format the date range
+    const startDate = new Date(bulkData.startDate).toLocaleDateString('fr-FR', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      timeZone: 'Africa/Casablanca'
+    });
+    
+    const endDate = new Date(bulkData.endDate).toLocaleDateString('fr-FR', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      timeZone: 'Africa/Casablanca'
+    });
+    
+    // Format time
+    const timeParts = bulkData.timeSlot.split(':');
+    const hours = parseInt(timeParts[0]);
+    const minutes = timeParts[1];
+    const formattedTime = `${hours}:${minutes}`;
+    
+    // Convert days of week to French
+    const dayNames = {
+      0: 'Dimanche',
+      1: 'Lundi', 
+      2: 'Mardi',
+      3: 'Mercredi',
+      4: 'Jeudi',
+      5: 'Vendredi',
+      6: 'Samedi'
+    };
+    
+    const selectedDaysText = bulkData.daysOfWeek.map(day => dayNames[day]).join(', ');
+    
+    // Create reservation list
+    let reservationsList = '';
+    bulkData.reservations.forEach(reservation => {
+      const reservationDate = new Date(reservation.date).toLocaleDateString('fr-FR', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long', 
+        day: 'numeric',
+        timeZone: 'Africa/Casablanca'
+      });
+      
+      reservationsList += `
+        <tr style="border-bottom: 1px solid #e0e0e0;">
+          <td style="padding: 8px;">${reservationDate}</td>
+          <td style="padding: 8px;">${formattedTime}</td>
+          <td style="padding: 8px;">✅ Confirmée</td>
+        </tr>
+      `;
+    });
+    
+    // Email content
+    const mailOptions = {
+      from: `"Suite Coaching" <${process.env.EMAIL_USER}>`,
+      to: bulkData.clientEmail,
+      subject: '🏆 Vos séances de coaching récurrentes sont confirmées !',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
+          <div style="text-align: center; margin-bottom: 20px;">
+            <h1 style="color: #00E5FF;">Vos séances de coaching récurrentes sont confirmées !</h1>
+          </div>
+          
+          <p>Bonjour <strong>${bulkData.clientName}</strong>,</p>
+          
+          <p>Excellente nouvelle ! Vos séances de coaching récurrentes ont été réservées avec succès.</p>
+          
+          <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <h3 style="color: #007bff; margin-top: 0;">📅 Détails de vos réservations récurrentes</h3>
+            <p><strong>Coach :</strong> ${bulkData.coachName}</p>
+            <p><strong>Période :</strong> Du ${startDate} au ${endDate}</p>
+            <p><strong>Jours :</strong> ${selectedDaysText}</p>
+            <p><strong>Heure :</strong> ${formattedTime}</p>
+            <p><strong>Nombre de séances créées :</strong> ${bulkData.reservations.length}</p>
+            <p><strong>Points utilisés :</strong> ${bulkData.reservations.length}</p>
+            <p><strong>Points restants :</strong> ${bulkData.remainingPoints}</p>
+          </div>
+          
+          <div style="margin: 20px 0;">
+            <h3 style="color: #007bff;">📋 Liste détaillée de vos séances</h3>
+            <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+              <thead>
+                <tr style="background-color: #007bff; color: white;">
+                  <th style="padding: 10px; text-align: left;">Date</th>
+                  <th style="padding: 10px; text-align: left;">Heure</th>
+                  <th style="padding: 10px; text-align: left;">Statut</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${reservationsList}
+              </tbody>
+            </table>
+          </div>
+          
+          <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107;">
+            <h4 style="color: #856404; margin-top: 0;">📝 Informations importantes</h4>
+            <ul style="color: #856404;">
+              <li>Veuillez arriver 5 minutes avant l'heure prévue pour chaque séance</li>
+              <li>Pour annuler ou reporter une séance, contactez-nous au moins 6 heures à l'avance</li>
+              <li>Chaque séance annulée dans les délais vous permettra de récupérer 1 point</li>
+              <li>En cas d'absence non justifiée, le point sera décompté</li>
+            </ul>
+          </div>
+          
+          <p>Nous avons hâte de vous accompagner dans l'atteinte de vos objectifs de fitness !</p>
+          
+          <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; font-size: 12px; color: #777;">
+            <p>Si vous avez des questions, veuillez répondre à cet email ou appelez-nous au +212 660-505652.</p>
+            <p>Suite Coaching<br>Lotissement Florida, Bureau N°39, Etage N°5, Imm. Corner Office, Lot 5 Bd Zoulikha Nasri, Casablanca 20000</p>
+          </div>
+        </div>
+      `
+    };
+    
+    console.log(`Sending bulk reservation email to ${bulkData.clientEmail}`);
+    
+    // Send the email
+    const info = await emailTransporter.sendMail(mailOptions);
+    
+    if (info.messageId) {
+      console.log('Bulk reservation email sent successfully:', info.messageId);
+      if (info.previewURL) {
+        console.log('Preview URL:', info.previewURL);
+      }
+      return true;
+    } else {
+      console.error('Failed to send bulk reservation email - no messageId returned');
+      return false;
+    }
+  } catch (error) {
+    console.error('Error sending bulk reservation email:', error);
+    return false;
+  }
+};
+
+// Send bulk reservation notification to coach
+const sendBulkCoachNotification = async (bulkData) => {
+  try {
+    console.log(`Preparing to send bulk coach notification email to ${bulkData.coachEmail}...`);
+    const emailTransporter = await createTransporter();
+    
+    if (!emailTransporter) {
+      console.error('Email transporter creation failed for bulk coach notification');
+      return false;
+    }
+    
+    // Format the date range
+    const startDate = new Date(bulkData.startDate).toLocaleDateString('fr-FR', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      timeZone: 'Africa/Casablanca'
+    });
+    
+    const endDate = new Date(bulkData.endDate).toLocaleDateString('fr-FR', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      timeZone: 'Africa/Casablanca'
+    });
+    
+    // Format time
+    const timeParts = bulkData.timeSlot.split(':');
+    const hours = parseInt(timeParts[0]);
+    const minutes = timeParts[1];
+    const formattedTime = `${hours}:${minutes}`;
+    
+    // Convert days of week to French
+    const dayNames = {
+      0: 'Dimanche',
+      1: 'Lundi', 
+      2: 'Mardi',
+      3: 'Mercredi',
+      4: 'Jeudi',
+      5: 'Vendredi',
+      6: 'Samedi'
+    };
+    
+    const selectedDaysText = bulkData.daysOfWeek.map(day => dayNames[day]).join(', ');
+    
+    // Create reservation list
+    let reservationsList = '';
+    bulkData.reservations.forEach(reservation => {
+      const reservationDate = new Date(reservation.date).toLocaleDateString('fr-FR', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long', 
+        day: 'numeric',
+        timeZone: 'Africa/Casablanca'
+      });
+      
+      reservationsList += `
+        <tr style="border-bottom: 1px solid #e0e0e0;">
+          <td style="padding: 8px;">${reservationDate}</td>
+          <td style="padding: 8px;">${formattedTime}</td>
+          <td style="padding: 8px;">✅ Confirmée</td>
+        </tr>
+      `;
+    });
+    
+    // Email content
+    const mailOptions = {
+      from: `"Système Suite Coaching" <${process.env.EMAIL_USER}>`,
+      to: bulkData.coachEmail,
+      subject: '🔔 Nouvelles séances récurrentes réservées',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
+          <div style="text-align: center; margin-bottom: 20px;">
+            <h1 style="color: #00E5FF;">Nouvelles séances récurrentes réservées</h1>
+          </div>
+          
+          <p>Bonjour <strong>${bulkData.coachName}</strong>,</p>
+
+          <p>De nouvelles séances de coaching récurrentes ont été réservées avec vous :</p>
+          
+          <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <h3 style="color: #007bff; margin-top: 0;">📅 Détails des réservations récurrentes</h3>
+            <p><strong>Client :</strong> ${bulkData.clientName}</p>
+            <p><strong>Email du client :</strong> ${bulkData.clientEmail}</p>
+            <p><strong>Période :</strong> Du ${startDate} au ${endDate}</p>
+            <p><strong>Jours :</strong> ${selectedDaysText}</p>
+            <p><strong>Heure :</strong> ${formattedTime}</p>
+            <p><strong>Nombre de séances créées :</strong> ${bulkData.reservations.length}</p>
+          </div>
+          
+          <div style="margin: 20px 0;">
+            <h3 style="color: #007bff;">📋 Planning détaillé de vos séances</h3>
+            <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+              <thead>
+                <tr style="background-color: #007bff; color: white;">
+                  <th style="padding: 10px; text-align: left;">Date</th>
+                  <th style="padding: 10px; text-align: left;">Heure</th>
+                  <th style="padding: 10px; text-align: left;">Statut</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${reservationsList}
+              </tbody>
+            </table>
+          </div>
+          
+          <div style="background-color: #d1ecf1; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #bee5eb;">
+            <h4 style="color: #0c5460; margin-top: 0;">📝 À noter</h4>
+            <ul style="color: #0c5460;">
+              <li>Veuillez noter ces rendez-vous dans votre calendrier personnel</li>
+              <li>Le client a été informé de l'importance d'arriver 5 minutes en avance</li>
+              <li>En cas de changement d'horaire, contactez le client directement</li>
+              <li>Si vous devez annuler, prévenez au moins 6 heures à l'avance</li>
+            </ul>
+          </div>
+          
+          <p>Bon coaching !</p>
+          
+          <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; font-size: 12px; color: #777;">
+            <p>Ceci est un message automatique du système de réservation Suite Coaching.</p>
+          </div>
+        </div>
+      `
+    };
+    
+    console.log(`Sending bulk coach notification to ${bulkData.coachEmail}`);
+    
+    // Send the email
+    const info = await emailTransporter.sendMail(mailOptions);
+    
+    if (info.messageId) {
+      console.log('Bulk coach notification email sent successfully:', info.messageId);
+      if (info.previewURL) {
+        console.log('Preview URL:', info.previewURL);
+      }
+      return true;
+    } else {
+      console.error('Failed to send bulk coach notification email - no messageId returned');
+      return false;
+    }
+  } catch (error) {
+    console.error('Error sending bulk coach notification email:', error);
+    return false;
+  }
+};
+
 module.exports = {
   sendReservationConfirmation,
-  sendCoachNotification
+  sendCoachNotification,
+  sendBulkReservationConfirmation,
+  sendBulkCoachNotification
 };

@@ -466,4 +466,81 @@ router.put('/admin/payments/plans/:paymentPlanId', verifyToken, verifyAdmin, asy
     }
 });
 
+// Delete a payment plan
+router.delete('/admin/payments/plans/:paymentPlanId', verifyToken, verifyAdmin, async (req, res) => {
+    const connection = await db.getConnection();
+    
+    try {
+        await connection.beginTransaction();
+        
+        const { paymentPlanId } = req.params;
+        const deleted_by = req.user.id;
+        
+        // Get payment plan details before deletion for logging
+        const [planDetails] = await connection.execute(`
+            SELECT pp.*, u.full_name as client_name, p.name as pack_name
+            FROM payment_plans pp
+            JOIN user_packs up ON pp.user_pack_id = up.id
+            JOIN users u ON up.user_id = u.id
+            JOIN packs p ON up.pack_id = p.id
+            WHERE pp.id = ?
+        `, [paymentPlanId]);
+        
+        if (planDetails.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Payment plan not found' });
+        }
+        
+        const plan = planDetails[0];
+        
+        // Check if any installments are already paid
+        const [paidInstallments] = await connection.execute(`
+            SELECT COUNT(*) as paid_count FROM payment_installments 
+            WHERE payment_plan_id = ? AND status = 'paid'
+        `, [paymentPlanId]);
+        
+        if (paidInstallments[0].paid_count > 0) {
+            await connection.rollback();
+            return res.status(400).json({ 
+                error: 'Cannot delete payment plan with paid installments. Please mark installments as unpaid first.' 
+            });
+        }
+        
+        // Log the deletion in payment history before deleting
+        await connection.execute(`
+            INSERT INTO payment_history (user_pack_id, action, old_value, notes, created_by)
+            VALUES (?, 'plan_deleted', ?, 'Payment plan deleted by admin', ?)
+        `, [plan.user_pack_id, JSON.stringify(plan), deleted_by]);
+        
+        // Delete installments first (due to foreign key constraints)
+        await connection.execute(`
+            DELETE FROM payment_installments WHERE payment_plan_id = ?
+        `, [paymentPlanId]);
+        
+        // Delete the payment plan
+        await connection.execute(`
+            DELETE FROM payment_plans WHERE id = ?
+        `, [paymentPlanId]);
+        
+        // Reset user pack payment status
+        await connection.execute(`
+            UPDATE user_packs SET payment_status = 'pending' WHERE id = ?
+        `, [plan.user_pack_id]);
+        
+        await connection.commit();
+        
+        res.json({ 
+            success: true, 
+            message: `Payment plan for ${plan.client_name} deleted successfully` 
+        });
+        
+    } catch (error) {
+        await connection.rollback();
+        console.error('Error deleting payment plan:', error);
+        res.status(500).json({ error: 'Failed to delete payment plan' });
+    } finally {
+        connection.release();
+    }
+});
+
 module.exports = router;

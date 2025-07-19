@@ -259,4 +259,121 @@ router.post('/admin/assign/:userId/:packId', verifyToken, verifyAdmin, async (re
     }
 });
 
+// Admin remove pack assignment from user
+router.delete('/admin/remove/:userPackId', verifyToken, verifyAdmin, async (req, res) => {
+    const connection = await db.getConnection();
+    
+    try {
+        await connection.beginTransaction();
+        
+        const userPackId = req.params.userPackId;
+        const { reason } = req.body;
+        
+        // Get the user pack details before removing
+        const [userPacks] = await connection.execute(
+            `SELECT up.*, u.full_name, u.username, u.id as user_id, 
+                    p.name as pack_name, p.points, p.solo_points, p.team_points
+             FROM user_packs up
+             JOIN users u ON up.user_id = u.id
+             JOIN packs p ON up.pack_id = p.id
+             WHERE up.id = ?`, 
+            [userPackId]
+        );
+        
+        if (userPacks.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Pack assignment not found' });
+        }
+        
+        const userPack = userPacks[0];
+        
+        // Check if user has enough points to deduct
+        const [users] = await connection.execute(
+            'SELECT points, solo_points, team_points FROM users WHERE id = ?', 
+            [userPack.user_id]
+        );
+        
+        const user = users[0];
+        const packPoints = userPack.points || 0;
+        const packSoloPoints = userPack.solo_points || 0;
+        const packTeamPoints = userPack.team_points || 0;
+        
+        // Check if user has enough points to deduct
+        if (user.points < packPoints) {
+            await connection.rollback();
+            return res.status(400).json({ 
+                error: `Cannot remove pack. User only has ${user.points} points but pack contains ${packPoints} points.` 
+            });
+        }
+        
+        if (user.solo_points < packSoloPoints) {
+            await connection.rollback();
+            return res.status(400).json({ 
+                error: `Cannot remove pack. User only has ${user.solo_points} solo points but pack contains ${packSoloPoints} solo points.` 
+            });
+        }
+        
+        if (user.team_points < packTeamPoints) {
+            await connection.rollback();
+            return res.status(400).json({ 
+                error: `Cannot remove pack. User only has ${user.team_points} team points but pack contains ${packTeamPoints} team points.` 
+            });
+        }
+        
+        // Deduct points from user's account
+        await connection.execute(
+            'UPDATE users SET points = points - ?, solo_points = solo_points - ?, team_points = team_points - ? WHERE id = ?',
+            [packPoints, packSoloPoints, packTeamPoints, userPack.user_id]
+        );
+        
+        // Remove the pack assignment
+        await connection.execute(
+            'DELETE FROM user_packs WHERE id = ?',
+            [userPackId]
+        );
+        
+        // Get updated user points
+        const [updatedUser] = await connection.execute(
+            'SELECT points, solo_points, team_points FROM users WHERE id = ?',
+            [userPack.user_id]
+        );
+        
+        await connection.commit();
+        
+        // Send notification to user about points deduction if available
+        if (global.notifyUser) {
+            global.notifyUser(userPack.user_id, {
+                type: 'pack_removed',
+                points_removed: packPoints,
+                solo_points_removed: packSoloPoints,
+                team_points_removed: packTeamPoints,
+                new_balance: updatedUser[0].points,
+                new_solo_balance: updatedUser[0].solo_points,
+                new_team_balance: updatedUser[0].team_points,
+                timestamp: new Date().toISOString(),
+                message: `An administrator has removed the ${userPack.pack_name} pack from your account. ${packSoloPoints} solo points and ${packTeamPoints} team points were deducted. Your new balance is ${updatedUser[0].solo_points} solo points and ${updatedUser[0].team_points} team points.`,
+                reason: reason || 'No reason provided'
+            });
+        }
+        
+        res.json({
+            message: `Successfully removed ${userPack.pack_name} from ${userPack.full_name || userPack.username}`,
+            points_removed: packPoints,
+            solo_points_removed: packSoloPoints,
+            team_points_removed: packTeamPoints,
+            new_balance: updatedUser[0].points,
+            new_solo_balance: updatedUser[0].solo_points,
+            new_team_balance: updatedUser[0].team_points,
+            reason: reason || 'No reason provided'
+        });
+        
+    } catch (error) {
+        await connection.rollback();
+        console.error('Error removing pack assignment:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        connection.release();
+    }
+});
+
 module.exports = router;
