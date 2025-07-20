@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
+const { isAuthenticated, isAdmin } = require('../utils/authMiddleware');
 
 // Get all coaches
 router.get('/', async (req, res) => {
@@ -339,46 +340,97 @@ router.post('/:id/availability', async (req, res) => {
 });
 
 // Delete coach availability
-router.delete('/availability/:id', async (req, res) => {
+router.delete('/availability/:id', isAuthenticated, isAdmin, async (req, res) => {
+    let connection;
+    
     try {
         const availabilityId = req.params.id;
+        console.log(`Attempting to delete single availability slot: ${availabilityId}`);
         
-        // Check if the slot is booked
-        const [checkBooked] = await db.execute(
-            'SELECT is_booked FROM coach_availability WHERE id = ?',
-            [availabilityId]
-        );
+        connection = await db.getConnection();
         
-        if (checkBooked.length === 0) {
-            return res.status(404).json({ error: 'Availability slot not found' });
+        // Try a fast delete with a very short timeout
+        let deleteResult;
+        try {
+            // Set a shorter lock timeout for this specific query (2 seconds)
+            await connection.execute('SET SESSION innodb_lock_wait_timeout = 2');
+            
+            deleteResult = await connection.execute(
+                'DELETE FROM coach_availability WHERE id = ? AND is_booked = 0',
+                [availabilityId]
+            );
+            
+            // Reset to default timeout
+            await connection.execute('SET SESSION innodb_lock_wait_timeout = 50');
+            
+        } catch (lockError) {
+            // Reset timeout even on error
+            await connection.execute('SET SESSION innodb_lock_wait_timeout = 50');
+            
+            if (lockError.code === 'ER_LOCK_WAIT_TIMEOUT') {
+                console.log(`Slot ${availabilityId} is locked, attempting force unlock...`);
+                
+                // Try to identify if this is a stuck transaction and provide better feedback
+                return res.status(503).json({ 
+                    error: 'This slot appears to be locked by another operation. Please try again in a few minutes or contact an administrator.',
+                    slotId: availabilityId,
+                    code: 'SLOT_LOCKED'
+                });
+            }
+            throw lockError;
         }
         
-        if (checkBooked[0].is_booked) {
-            return res.status(400).json({ error: 'Cannot delete a booked slot' });
+        const [result] = deleteResult;
+        
+        if (result.affectedRows === 0) {
+            // Only check why it failed if the delete didn't work
+            const [checkSlot] = await connection.execute(
+                'SELECT is_booked FROM coach_availability WHERE id = ?',
+                [availabilityId]
+            );
+            
+            if (checkSlot.length === 0) {
+                return res.status(404).json({ error: 'Availability slot not found' });
+            } else if (checkSlot[0].is_booked) {
+                return res.status(400).json({ error: 'Cannot delete a booked slot' });
+            }
         }
         
-        await db.execute('DELETE FROM coach_availability WHERE id = ?', [availabilityId]);
-        
+        console.log(`Successfully deleted availability slot ${availabilityId}`);
         res.json({ message: 'Availability slot deleted successfully' });
+        
     } catch (error) {
         console.error('Error deleting availability:', error);
-        res.status(500).json({ 
-            error: 'Failed to delete availability',
-            message: error.message
-        });
+        
+        // Provide more specific error messaging
+        if (error.code === 'ER_LOCK_WAIT_TIMEOUT') {
+            res.status(503).json({ 
+                error: 'Database is busy, please try again in a moment',
+                message: 'Lock timeout occurred',
+                slotId: req.params.id
+            });
+        } else {
+            res.status(500).json({ 
+                error: 'Failed to delete availability',
+                message: error.message
+            });
+        }
+    } finally {
+        if (connection) {
+            connection.release();
+        }
     }
 });
 
 // Bulk delete coach availability  
-router.post('/availability/bulk-delete', async (req, res) => {
-    const connection = await db.getConnection();
+router.post('/availability/bulk-delete', isAuthenticated, isAdmin, async (req, res) => {
+    let connection;
     
     try {
         const { ids } = req.body;
         
         // Validate input
         if (!ids || !Array.isArray(ids) || ids.length === 0) {
-            connection.release();
             return res.status(400).json({ error: 'Invalid or empty IDs array' });
         }
         
@@ -386,50 +438,146 @@ router.post('/availability/bulk-delete', async (req, res) => {
         const slotIds = ids.map(id => parseInt(id)).filter(id => !isNaN(id));
         
         if (slotIds.length === 0) {
-            connection.release();
             return res.status(400).json({ error: 'No valid IDs provided' });
         }
+
+        console.log(`Attempting to bulk delete ${slotIds.length} availability slots: ${slotIds.join(', ')}`);
         
-        await connection.beginTransaction();
+        connection = await db.getConnection();
         
-        // Check if any slots are booked - we shouldn't allow deletion of booked slots
-        const placeholders = slotIds.map(() => '?').join(',');
-        const [bookedSlots] = await connection.execute(
-            `SELECT id FROM coach_availability WHERE id IN (${placeholders}) AND is_booked = 1`,
-            slotIds
-        );
+        // Set a shorter lock timeout to avoid getting stuck
+        await connection.execute('SET SESSION innodb_lock_wait_timeout = 3');
         
-        if (bookedSlots.length > 0) {
-            await connection.rollback();
-            connection.release();
-            return res.status(400).json({ 
-                error: 'Cannot delete booked slots',
-                bookedSlots: bookedSlots.map(slot => slot.id)
-            });
+        try {
+            // Try batch delete first
+            const placeholders = slotIds.map(() => '?').join(',');
+            const [result] = await connection.execute(
+                `DELETE FROM coach_availability WHERE id IN (${placeholders}) AND is_booked = 0`,
+                slotIds
+            );
+            
+            const totalDeleted = result.affectedRows;
+            console.log(`Batch deleted ${totalDeleted} slots out of ${slotIds.length} requested`);
+            
+            // Reset timeout
+            await connection.execute('SET SESSION innodb_lock_wait_timeout = 50');
+            
+            // Calculate failed deletions
+            const failedCount = slotIds.length - totalDeleted;
+            
+            if (failedCount > 0) {
+                res.status(207).json({ // 207 Multi-Status
+                    message: `Partially completed: ${totalDeleted} slots deleted, ${failedCount} failed (may be booked or not found)`,
+                    deletedCount: totalDeleted,
+                    failedCount: failedCount,
+                    totalRequested: slotIds.length
+                });
+            } else {
+                res.json({ 
+                    message: `Successfully deleted ${totalDeleted} availability slots`,
+                    deletedCount: totalDeleted
+                });
+            }
+            
+        } catch (batchError) {
+            // Reset timeout even on error
+            await connection.execute('SET SESSION innodb_lock_wait_timeout = 50');
+            
+            if (batchError.code === 'ER_LOCK_WAIT_TIMEOUT') {
+                console.log('Batch delete failed due to lock timeout, falling back to individual deletions...');
+                
+                // Fall back to individual deletions with very short timeout
+                await connection.execute('SET SESSION innodb_lock_wait_timeout = 2');
+                
+                let totalDeleted = 0;
+                let lockedSlots = [];
+                let bookedOrNotFoundSlots = [];
+                
+                for (const slotId of slotIds) {
+                    try {
+                        const [result] = await connection.execute(
+                            'DELETE FROM coach_availability WHERE id = ? AND is_booked = 0',
+                            [slotId]
+                        );
+                        
+                        if (result.affectedRows > 0) {
+                            totalDeleted++;
+                            console.log(`Deleted slot ${slotId} (${totalDeleted}/${slotIds.length})`);
+                        } else {
+                            bookedOrNotFoundSlots.push(slotId);
+                        }
+                        
+                    } catch (slotError) {
+                        if (slotError.code === 'ER_LOCK_WAIT_TIMEOUT') {
+                            console.log(`Slot ${slotId} is locked, skipping...`);
+                            lockedSlots.push(slotId);
+                        } else {
+                            console.error(`Error deleting slot ${slotId}:`, slotError.message);
+                            bookedOrNotFoundSlots.push(slotId);
+                        }
+                    }
+                }
+                
+                // Reset timeout
+                await connection.execute('SET SESSION innodb_lock_wait_timeout = 50');
+                
+                console.log(`Individual delete completed: ${totalDeleted} deleted, ${lockedSlots.length} locked, ${bookedOrNotFoundSlots.length} booked/not found`);
+                
+                // Build response
+                let message = `Completed with individual deletions: ${totalDeleted} deleted`;
+                const responseData = {
+                    deletedCount: totalDeleted,
+                    totalRequested: slotIds.length,
+                    usedFallbackMethod: true
+                };
+                
+                if (lockedSlots.length > 0) {
+                    message += `, ${lockedSlots.length} locked (try again later)`;
+                    responseData.lockedSlots = lockedSlots;
+                }
+                
+                if (bookedOrNotFoundSlots.length > 0) {
+                    message += `, ${bookedOrNotFoundSlots.length} booked/not found`;
+                    responseData.failedSlots = bookedOrNotFoundSlots;
+                }
+                
+                responseData.message = message;
+                
+                res.status(totalDeleted > 0 ? 207 : 503).json(responseData);
+                
+            } else {
+                throw batchError;
+            }
         }
         
-        // Delete all the slots
-        const [result] = await connection.execute(
-            `DELETE FROM coach_availability WHERE id IN (${placeholders}) AND is_booked = 0`,
-            slotIds
-        );
-        
-        await connection.commit();
-        connection.release();
-        
-        res.json({ 
-            message: `Successfully deleted ${result.affectedRows} availability slots`,
-            deletedCount: result.affectedRows
-        });
-        
     } catch (error) {
-        await connection.rollback();
-        connection.release();
         console.error('Error bulk deleting availability:', error);
-        res.status(500).json({ 
-            error: 'Failed to bulk delete availability',
-            message: error.message
-        });
+        
+        // Always reset timeout on any error
+        if (connection) {
+            try {
+                await connection.execute('SET SESSION innodb_lock_wait_timeout = 50');
+            } catch (resetError) {
+                console.error('Error resetting timeout:', resetError);
+            }
+        }
+        
+        // Provide more specific error messaging
+        if (error.code === 'ER_LOCK_WAIT_TIMEOUT') {
+            res.status(503).json({ 
+                error: 'Database is busy, please try again in a moment',
+                message: 'Lock timeout occurred during bulk delete'
+            });
+        } else {
+            res.status(500).json({ 
+                error: 'Failed to bulk delete availability',
+                message: error.message
+            });
+        }
+    } finally {
+        if (connection) {
+            connection.release();
+        }
     }
 });
 

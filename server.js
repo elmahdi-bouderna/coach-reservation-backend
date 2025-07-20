@@ -176,6 +176,7 @@ server.listen(PORT, '0.0.0.0', async () => {
     console.log('- POST /api/coaches');
     console.log('- POST /api/coaches/:id/availability');
     console.log('- DELETE /api/coaches/availability/:id');
+    console.log('- POST /api/coaches/availability/bulk-delete');
     console.log('- POST /api/reserve');
     console.log('- GET /api/reservations');
     console.log('- POST /api/reserve-by-admin');
