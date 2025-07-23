@@ -329,7 +329,7 @@ router.delete('/admin/reservations/:id', verifyToken, verifyAdmin, async (req, r
 });
 
 // Protected route - Cancel a reservation (admin only)
-router.post('/cancel/:id', verifyToken, verifyAdmin, async (req, res) => {
+router.post('/admin/cancel/:id', verifyToken, verifyAdmin, async (req, res) => {
     console.log(`\n=== ADMIN CANCELLATION REQUEST FOR RESERVATION ID: ${req.params.id} ===`);
     
     // Get a connection from the pool for transaction
@@ -345,9 +345,8 @@ router.post('/cancel/:id', verifyToken, verifyAdmin, async (req, res) => {
         
         // First, get the reservation details
         const [reservationData] = await connection.execute(`
-            SELECT r.*, ca.id as availability_id 
+            SELECT r.* 
             FROM reservations r
-            JOIN coach_availability ca ON r.coach_id = ca.coach_id AND r.date = ca.date AND r.time = ca.start_time
             WHERE r.id = ?
         `, [reservationId]);
         
@@ -359,6 +358,19 @@ router.post('/cancel/:id', verifyToken, verifyAdmin, async (req, res) => {
         
         const reservation = reservationData[0];
         console.log(`Found reservation for ${reservation.full_name} on ${reservation.date} at ${reservation.time}`);
+        console.log(`Session type: ${reservation.session_type}, Is free: ${reservation.is_free}`);
+        
+        // Calculate end time based on session type
+        const startTime = reservation.time;
+        const [startHours, startMinutes] = startTime.split(':').map(Number);
+        const startTotalMinutes = startHours * 60 + startMinutes;
+        const duration = reservation.session_type === 'bilan' ? 25 : 55; // 25 min for bilan, 55 min for normal
+        const endTotalMinutes = startTotalMinutes + duration;
+        const endHours = Math.floor(endTotalMinutes / 60);
+        const endMins = endTotalMinutes % 60;
+        const endTime = `${endHours.toString().padStart(2, '0')}:${endMins.toString().padStart(2, '0')}:00`;
+        
+        console.log(`Calculated reservation period: ${startTime} - ${endTime}`);
         
         // Check if the reservation is in the past
         const now = new Date();
@@ -373,52 +385,19 @@ router.post('/cancel/:id', verifyToken, verifyAdmin, async (req, res) => {
                 error: 'Cannot cancel past reservations. The session has already occurred.'
             });
         }
-        
-        // Check if the slot is already free (should not happen, but let's be safe)
-        const [availabilityCheck] = await connection.execute(`
-            SELECT is_booked FROM coach_availability 
-            WHERE id = ?
-        `, [reservation.availability_id]);
-        
-        if (availabilityCheck.length === 0) {
-            await connection.rollback();
-            connection.release();
-            return res.status(404).json({ error: 'Availability slot not found' });
-        }
-        
-        if (availabilityCheck[0].is_booked !== 1) {
-            await connection.rollback();
-            connection.release();
-            return res.status(400).json({ error: 'This time slot is not currently booked' });
-        }
-          // Mark the slot as available again
-        await connection.execute(`
-            UPDATE coach_availability 
-            SET is_booked = 0 
-            WHERE id = ?
-        `, [reservation.availability_id]);
 
-        console.log(`Marked availability slot ${reservation.availability_id} as available`);
-
-        // Get the time slot details to free overlapping slots
-        const [slotDetails] = await connection.execute(`
-            SELECT start_time, end_time FROM coach_availability 
-            WHERE id = ?
-        `, [reservation.availability_id]);
-
-        if (slotDetails.length > 0) {
-            // Mark all overlapping slots as available
-            const freedSlotsCount = await freeOverlappingSlots(
-                connection,
-                reservation.coach_id,
-                reservation.date,
-                slotDetails[0].start_time,
-                slotDetails[0].end_time,
-                true // this is the admin cancellation endpoint
-            );
-            
-            console.log(`Freed ${freedSlotsCount} overlapping availability slots`);
-        }
+        // Mark all overlapping slots as available
+        const { freeOverlappingSlots } = require('../utils/availabilityHelpers');
+        const freedSlotsCount = await freeOverlappingSlots(
+            connection,
+            reservation.coach_id,
+            reservation.date,
+            startTime,
+            endTime,
+            true // this is the admin cancellation endpoint
+        );
+        
+        console.log(`Freed ${freedSlotsCount} overlapping availability slots`);
         
         // If we need to refund points and there is a user associated with this reservation
         if (refundPoints && reservation.user_id) {
@@ -725,7 +704,8 @@ router.get('/admin/planning/availability', async (req, res) => {
                 DATE_FORMAT(ca.date, '%Y-%m-%d') as date,
                 TIME_FORMAT(ca.start_time, '%H:%i') as start_time,
                 TIME_FORMAT(ca.end_time, '%H:%i') as end_time,
-                CASE WHEN ca.is_booked = 1 THEN 0 ELSE 1 END as is_available,
+                ca.status,
+                CASE WHEN ca.status = 'available' THEN 1 ELSE 0 END as is_available,
                 c.name as coach_name,
                 c.photo as profile_image,
                 c.specialty
@@ -957,7 +937,7 @@ router.post('/admin/bulk-reservations', verifyToken, verifyAdmin, async (req, re
                     // Check if the time slot exists and is available for this coach on this date
                     const [availabilityCheck] = await connection.execute(`
                         SELECT id, start_time, end_time FROM coach_availability 
-                        WHERE coach_id = ? AND date = ? AND start_time = ? AND is_booked = 0
+                        WHERE coach_id = ? AND date = ? AND start_time = ? AND status = 'available'
                     `, [coach_id, dateStr, time_slot]);
                     
                     if (availabilityCheck.length > 0) {

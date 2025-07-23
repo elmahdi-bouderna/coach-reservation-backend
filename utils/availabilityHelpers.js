@@ -21,11 +21,11 @@ async function markOverlappingSlots(connection, coachId, date, startTime, endTim
         // Two time periods overlap if: start1 < end2 AND start2 < end1
         // Where period1 is the reservation and period2 is each slot
         const [overlappingSlots] = await connection.execute(`
-            SELECT id, start_time, end_time, session_type, duration
+            SELECT id, start_time, end_time, session_type, duration, status
             FROM coach_availability 
             WHERE coach_id = ? 
             AND date = ? 
-            AND is_booked = 0
+            AND status IN ('available', 'overlapping')
             AND start_time < ?
             AND end_time > ?
         `, [
@@ -40,13 +40,28 @@ async function markOverlappingSlots(connection, coachId, date, startTime, endTim
             console.log(`- Slot ID ${slot.id}: ${slot.start_time}-${slot.end_time} (${slot.session_type}, ${slot.duration}min)`);
         });
 
-        // Mark all overlapping slots as booked and link them to the reservation
+        // Mark slots based on whether they are the exact match or overlapping
         for (const slot of overlappingSlots) {
-            await connection.execute(`
-                UPDATE coach_availability 
-                SET is_booked = 1, reservation_id = ?
-                WHERE id = ?
-            `, [reservationId, slot.id]);
+            // Check if this slot is the exact match for the reservation
+            const isExactMatch = slot.start_time === startTime && slot.end_time === endTime;
+            
+            if (isExactMatch) {
+                // This is the booked slot
+                await connection.execute(`
+                    UPDATE coach_availability 
+                    SET status = 'booked', is_booked = 1, reservation_id = ?
+                    WHERE id = ?
+                `, [reservationId, slot.id]);
+                console.log(`Marked slot ${slot.id} as 'booked' (exact match)`);
+            } else {
+                // This is an overlapping slot
+                await connection.execute(`
+                    UPDATE coach_availability 
+                    SET status = 'overlapping', is_booked = 1, reservation_id = ?
+                    WHERE id = ?
+                `, [reservationId, slot.id]);
+                console.log(`Marked slot ${slot.id} as 'overlapping'`);
+            }
         }
 
         console.log(`Marked ${overlappingSlots.length} slots as booked`);
@@ -78,11 +93,11 @@ async function freeOverlappingSlots(connection, coachId, date, startTime, endTim
 
         // Build the SQL query based on whether it's an admin cancellation
         let query = `
-            SELECT id, start_time, end_time, session_type, duration
+            SELECT id, start_time, end_time, session_type, duration, status
             FROM coach_availability 
             WHERE coach_id = ? 
             AND date = ? 
-            AND is_booked = 1
+            AND status IN ('booked', 'overlapping')
             AND start_time < ?
             AND end_time > ?
         `;
@@ -117,7 +132,7 @@ async function freeOverlappingSlots(connection, coachId, date, startTime, endTim
         for (const slot of overlappingSlots) {
             await connection.execute(`
                 UPDATE coach_availability 
-                SET is_booked = 0, reservation_id = NULL
+                SET status = 'available', is_booked = 0, reservation_id = NULL
                 WHERE id = ?
             `, [slot.id]);
         }

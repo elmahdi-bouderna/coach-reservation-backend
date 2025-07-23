@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
+const { verifyToken, verifyAdmin } = require('./auth');
 const { sendReservationConfirmation, sendCoachNotification } = require('../utils/emailService');
 const { markOverlappingSlots, freeOverlappingSlots } = require('../utils/availabilityHelpers');
 
@@ -85,7 +86,7 @@ router.post('/reserve', async (req, res) => {
         // Check if the slot is still available for the requested session type
         const [availabilityCheck] = await connection.execute(`
             SELECT id, session_type FROM coach_availability 
-            WHERE coach_id = ? AND date = ? AND start_time = ? AND is_booked = 0 AND session_type = ?
+            WHERE coach_id = ? AND date = ? AND start_time = ? AND status = 'available' AND session_type = ?
         `, [coach_id, date, time, session_type]);
 
         if (availabilityCheck.length === 0) {
@@ -308,7 +309,7 @@ router.post('/reserve', async (req, res) => {
 });
 
 // Cancel a reservation (admin only)
-router.post('/cancel/:id', async (req, res) => {
+router.post('/cancel/:id', verifyToken, verifyAdmin, async (req, res) => {
     console.log(`\n=== CANCELLATION REQUEST FOR RESERVATION ID: ${req.params.id} ===`);
     
     // Get a connection from the pool for transaction
@@ -322,11 +323,10 @@ router.post('/cancel/:id', async (req, res) => {
         
         console.log(`Processing cancellation for reservation ${reservationId}, refund points: ${refundPoints}`);
         
-        // First, get the reservation details with slot times
+        // First, get the reservation details
         const [reservationData] = await connection.execute(`
-            SELECT r.*, ca.id as availability_id, ca.start_time, ca.end_time 
+            SELECT r.* 
             FROM reservations r
-            JOIN coach_availability ca ON r.coach_id = ca.coach_id AND r.date = ca.date AND r.time = ca.start_time
             WHERE r.id = ?
         `, [reservationId]);
         
@@ -338,12 +338,25 @@ router.post('/cancel/:id', async (req, res) => {
         
         const reservation = reservationData[0];
         console.log(`Found reservation for ${reservation.full_name} on ${reservation.date} at ${reservation.time}`);
+        console.log(`Session type: ${reservation.session_type}, Is free: ${reservation.is_free}`);
+        
+        // Calculate end time based on session type
+        const startTime = reservation.time;
+        const [hours, minutes] = startTime.split(':').map(Number);
+        const startMinutes = hours * 60 + minutes;
+        const duration = reservation.session_type === 'bilan' ? 25 : 55; // 25 min for bilan, 55 min for normal
+        const endMinutes = startMinutes + duration;
+        const endHours = Math.floor(endMinutes / 60);
+        const endMins = endMinutes % 60;
+        const endTime = `${endHours.toString().padStart(2, '0')}:${endMins.toString().padStart(2, '0')}:00`;
+        
+        console.log(`Calculated reservation period: ${startTime} - ${endTime}`);
         
         // Check if the reservation is in the past
         const now = new Date();
         const reservationDate = new Date(reservation.date);
-        const [hours, minutes] = reservation.time.split(':').map(Number);
-        reservationDate.setHours(hours, minutes, 0, 0);
+        const [startHour, startMin] = reservation.time.split(':').map(Number);
+        reservationDate.setHours(startHour, startMin, 0, 0);
         
         if (reservationDate < now) {
             await connection.rollback();
@@ -352,32 +365,14 @@ router.post('/cancel/:id', async (req, res) => {
                 error: 'Cannot cancel past reservations. The session has already occurred.'
             });
         }
-        
-        // Check if the slot exists and is booked
-        const [availabilityCheck] = await connection.execute(`
-            SELECT is_booked FROM coach_availability 
-            WHERE id = ?
-        `, [reservation.availability_id]);
-        
-        if (availabilityCheck.length === 0) {
-            await connection.rollback();
-            connection.release();
-            return res.status(404).json({ error: 'Availability slot not found' });
-        }
-        
-        if (availabilityCheck[0].is_booked !== 1) {
-            await connection.rollback();
-            connection.release();
-            return res.status(400).json({ error: 'This time slot is not currently booked' });
-        }
 
         // Mark all overlapping slots as available
         const freedSlotsCount = await freeOverlappingSlots(
             connection,
             reservation.coach_id,
             reservation.date,
-            reservation.start_time,
-            reservation.end_time,
+            startTime,
+            endTime,
             true // this is the admin cancellation endpoint
         );
         
@@ -591,39 +586,19 @@ router.post('/reservations/client/cancel/:id', async (req, res) => {
                 error: 'Cannot cancel reservations within 6 hours of the scheduled time. Please contact an administrator if you need assistance.'
             });
         }
-        
-        // Check if the slot exists and is booked
-        const [availabilityCheck] = await connection.execute(`
-            SELECT is_booked, start_time, end_time FROM coach_availability 
-            WHERE id = ?
-        `, [reservation.availability_id]);
-        
-        if (availabilityCheck.length === 0) {
-            await connection.rollback();
-            connection.release();
-            return res.status(404).json({ error: 'Availability slot not found' });
-        }
-        
-        if (availabilityCheck[0].is_booked !== 1) {
-            await connection.rollback();
-            connection.release();
-            return res.status(400).json({ error: 'This time slot is not currently booked' });
-        }
 
         // Mark all overlapping slots as available again
-        // For admin cancellations, pass isAdmin=true to handle past slots differently
+        // For client cancellations, pass isAdmin=false to handle future slots only
         const freedSlotsCount = await freeOverlappingSlots(
             connection,
             reservation.coach_id,
             reservation.date,
-            availabilityCheck[0].start_time,
-            availabilityCheck[0].end_time,
-            true // this is the admin cancellation endpoint
+            startTime,
+            endTime,
+            false // this is the client cancellation endpoint
         );
         
         console.log(`Freed ${freedSlotsCount} overlapping availability slots`);
-        
-        console.log(`Marked availability slot ${reservation.availability_id} as available`);
         
         // Get current points for logging
         const [currentPoints] = await connection.execute('SELECT points, solo_points, team_points FROM users WHERE id = ?', [userId]);

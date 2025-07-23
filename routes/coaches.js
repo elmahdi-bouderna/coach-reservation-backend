@@ -52,14 +52,14 @@ router.get('/:id/availability', async (req, res) => {
                 ca.date, 
                 ca.start_time, 
                 ca.end_time, 
-                ca.is_booked, 
+                ca.status,
                 ca.session_type,
                 ca.duration,
                 c.name
             FROM coach_availability ca
             JOIN coaches c ON ca.coach_id = c.id
             WHERE ca.coach_id = ? 
-            AND ca.is_booked = 0
+            AND ca.status = 'available'
             AND ca.session_type = ?
             AND (
                 ca.date > ? 
@@ -110,7 +110,7 @@ router.get('/:id/all-availability', async (req, res) => {
                 ca.date, 
                 ca.start_time, 
                 ca.end_time, 
-                ca.is_booked,
+                ca.status,
                 ca.duration,
                 ca.session_type,
                 ca.is_free,
@@ -428,7 +428,7 @@ router.delete('/availability/:id', isAuthenticated, isAdmin, async (req, res) =>
             await connection.execute('SET SESSION innodb_lock_wait_timeout = 2');
             
             deleteResult = await connection.execute(
-                'DELETE FROM coach_availability WHERE id = ? AND is_booked = 0',
+                'DELETE FROM coach_availability WHERE id = ? AND status = \'available\'',
                 [availabilityId]
             );
             
@@ -457,14 +457,14 @@ router.delete('/availability/:id', isAuthenticated, isAdmin, async (req, res) =>
         if (result.affectedRows === 0) {
             // Only check why it failed if the delete didn't work
             const [checkSlot] = await connection.execute(
-                'SELECT is_booked FROM coach_availability WHERE id = ?',
+                'SELECT status FROM coach_availability WHERE id = ?',
                 [availabilityId]
             );
             
             if (checkSlot.length === 0) {
                 return res.status(404).json({ error: 'Availability slot not found' });
-            } else if (checkSlot[0].is_booked) {
-                return res.status(400).json({ error: 'Cannot delete a booked slot' });
+            } else if (checkSlot[0].status === 'booked' || checkSlot[0].status === 'overlapping') {
+                return res.status(400).json({ error: 'Cannot delete a booked or overlapping slot' });
             }
         }
         
@@ -524,7 +524,7 @@ router.post('/availability/bulk-delete', isAuthenticated, isAdmin, async (req, r
             // Try batch delete first
             const placeholders = slotIds.map(() => '?').join(',');
             const [result] = await connection.execute(
-                `DELETE FROM coach_availability WHERE id IN (${placeholders}) AND is_booked = 0`,
+                `DELETE FROM coach_availability WHERE id IN (${placeholders}) AND status = 'available'`,
                 slotIds
             );
             
@@ -568,7 +568,7 @@ router.post('/availability/bulk-delete', isAuthenticated, isAdmin, async (req, r
                 for (const slotId of slotIds) {
                     try {
                         const [result] = await connection.execute(
-                            'DELETE FROM coach_availability WHERE id = ? AND is_booked = 0',
+                            'DELETE FROM coach_availability WHERE id = ? AND status = \'available\'',
                             [slotId]
                         );
                         

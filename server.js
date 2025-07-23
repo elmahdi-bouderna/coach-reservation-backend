@@ -104,9 +104,11 @@ const profileRoutes = require('./routes/profile');
 const groupCoursesRoutes = require('./routes/group-courses');
 const adminPaymentsRoutes = require('./routes/admin-payments');
 const healthRoutes = require('./routes/health');
+const migrationRoutes = require('./routes/migration');
 
 // Mount the routes
 app.use('/api/health', healthRoutes);
+app.use('/api/migration', migrationRoutes);
 app.use('/api/coaches', coachesRoutes);
 app.use('/api', reservationsRoutes);  // This will handle /api/reserve and /api/reservations
 app.use('/api/coach-dashboard', coachDashboardRoutes); // Routes for coach dashboard
