@@ -24,9 +24,14 @@ router.post('/reserve', async (req, res) => {
             goal,
             date,
             time,
+            session_type = 'normal', // Default to normal session
             created_by = 'client',
             user_id = null
         } = req.body;
+
+        console.log(`\n=== CREATING ${session_type.toUpperCase()} RESERVATION ===`);
+        console.log(`Coach: ${coach_id}, Date: ${date}, Time: ${time}`);
+        console.log(`User ID: ${user_id || 'Guest'}`);
 
         // Validate required fields
         const missingFields = [];
@@ -53,6 +58,15 @@ router.post('/reserve', async (req, res) => {
             });
         }
 
+        // Validate session_type
+        if (!['normal', 'bilan'].includes(session_type)) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ 
+                error: 'Session type must be either "normal" or "bilan"'
+            });
+        }
+
         // Check if the requested date and time are in the past
         const now = new Date();
         const currentDate = now.toISOString().split('T')[0]; // YYYY-MM-DD
@@ -68,17 +82,17 @@ router.post('/reserve', async (req, res) => {
             });
         }
 
-        // Check if the slot is still available
+        // Check if the slot is still available for the requested session type
         const [availabilityCheck] = await connection.execute(`
-            SELECT id FROM coach_availability 
-            WHERE coach_id = ? AND date = ? AND start_time = ? AND is_booked = 0
-        `, [coach_id, date, time]);
+            SELECT id, session_type FROM coach_availability 
+            WHERE coach_id = ? AND date = ? AND start_time = ? AND is_booked = 0 AND session_type = ?
+        `, [coach_id, date, time, session_type]);
 
         if (availabilityCheck.length === 0) {
             await connection.rollback();
             connection.release();
             return res.status(400).json({ 
-                error: 'This time slot is no longer available'
+                error: `No ${session_type} session slot is available at this time`
             });
         }
         
@@ -100,27 +114,32 @@ router.post('/reserve', async (req, res) => {
             
             const user = userData[0];
             
-            // Check if user has enough solo points
-            if (user.solo_points < 1) {
-                await connection.rollback();
-                connection.release();
-                return res.status(400).json({ 
-                    error: `Not enough solo points. You need at least 1 solo point to book an individual session. You currently have ${user.solo_points} solo points.`
-                });
+            // Check points requirement based on session type
+            if (session_type === 'normal') {
+                // Normal sessions require 1 solo point
+                if (user.solo_points < 1) {
+                    await connection.rollback();
+                    connection.release();
+                    return res.status(400).json({ 
+                        error: `Not enough solo points. You need at least 1 solo point to book a normal session. You currently have ${user.solo_points} solo points.`
+                    });
+                }
+                
+                // Deduct solo points for normal sessions
+                console.log(`Deducting 1 solo point from user ${user_id} for normal session. Current solo points: ${user.solo_points}`);
+                await connection.execute(`
+                    UPDATE users SET points = points - 1, solo_points = solo_points - 1 WHERE id = ?
+                `, [user_id]);
+                console.log(`Point deduction query executed for user ${user_id}`);
+            } else if (session_type === 'bilan') {
+                // Bilan sessions are free - no points deducted
+                console.log(`Bilan session is free for user ${user_id} - no points deducted`);
             }
-            
-            // Deduct solo points
-            console.log(`Deducting 1 solo point from user ${user_id}. Current solo points: ${user.solo_points}`);
-            await connection.execute(`
-                UPDATE users SET points = points - 1, solo_points = solo_points - 1 WHERE id = ?
-            `, [user_id]);
-            console.log(`Point deduction query executed for user ${user_id}`);
-            
             
             // Use user profile data from database
             reservationData = `
-                INSERT INTO reservations (coach_id, full_name, email, phone, age, gender, goal, date, time, created_by, user_id, status, reservation_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', 'individual')
+                INSERT INTO reservations (coach_id, full_name, email, phone, age, gender, goal, date, time, created_by, user_id, status, reservation_type, session_type, is_free)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', 'individual', ?, ?)
             `;
             
             params = [
@@ -134,13 +153,15 @@ router.post('/reserve', async (req, res) => {
                 date, 
                 time, 
                 created_by,
-                user_id
+                user_id,
+                session_type,
+                session_type === 'bilan' // is_free = true for bilan sessions
             ];
         } else {
-            // No user_id, use data from the request
+            // No user_id, use data from the request (guest reservations are always normal and paid)
             reservationData = `
-                INSERT INTO reservations (coach_id, full_name, email, phone, age, gender, goal, date, time, created_by, status, reservation_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', 'individual')
+                INSERT INTO reservations (coach_id, full_name, email, phone, age, gender, goal, date, time, created_by, status, reservation_type, session_type, is_free)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', 'individual', ?, ?)
             `;
             
             params = [
@@ -153,16 +174,18 @@ router.post('/reserve', async (req, res) => {
                 goal, 
                 date, 
                 time, 
-                created_by
+                created_by,
+                session_type,
+                false // guest reservations are not free, even bilan sessions
             ];
         }
 
         // Get the selected slot's details
         const [selectedSlot] = await connection.execute(`
-            SELECT start_time, end_time
+            SELECT start_time, end_time, session_type, duration
             FROM coach_availability 
-            WHERE coach_id = ? AND date = ? AND start_time = ?
-        `, [coach_id, date, time]);
+            WHERE coach_id = ? AND date = ? AND start_time = ? AND session_type = ?
+        `, [coach_id, date, time, session_type]);
 
         if (selectedSlot.length === 0) {
             await connection.rollback();
@@ -222,20 +245,29 @@ router.post('/reserve', async (req, res) => {
             goal: params[6],
             date,
             time,
+            session_type,
             created_at: new Date(),
-            points_deducted: 1,
-            solo_points_deducted: 1,
+            points_deducted: session_type === 'normal' && user_id ? 1 : 0,
+            solo_points_deducted: session_type === 'normal' && user_id ? 1 : 0,
             team_points_deducted: 0,
             remaining_points: updatedPoints,
             remaining_solo_points: updatedSoloPoints,
             remaining_team_points: updatedTeamPoints,
-            reservation_type: 'individual'
+            reservation_type: 'individual',
+            is_free: session_type === 'bilan' && user_id
         };
         
         console.log('Reservation created successfully');
         
-        // Send the successful response immediately
-        res.status(201).json(reservation);
+        // Send the successful response immediately with custom message for bilan
+        const responseMessage = session_type === 'bilan' 
+            ? 'Votre séance bilan (25 minutes) a été réservée avec succès! Cette séance est gratuite.'
+            : 'Votre réservation a été confirmée avec succès!';
+            
+        res.status(201).json({
+            ...reservation,
+            message: responseMessage
+        });
         
         // Try to send email notifications asynchronously (non-blocking)
         // We moved this after the response to prevent delays for the client
@@ -359,50 +391,65 @@ router.post('/cancel/:id', async (req, res) => {
             const beforeSoloPoints = currentPoints[0]?.solo_points || 0;
             const beforeTeamPoints = currentPoints[0]?.team_points || 0;
             
-            // Check reservation type to determine which points to refund
-            if (reservation.reservation_type === 'individual') {
-                console.log(`Refunding 1 solo point to user ID: ${reservation.user_id}. Current solo points: ${beforeSoloPoints}`);
+            // Only refund points if this was a paid session (normal sessions)
+            if (reservation.session_type === 'normal') {
+                // Check reservation type to determine which points to refund
+                if (reservation.reservation_type === 'individual') {
+                    console.log(`Refunding 1 solo point to user ID: ${reservation.user_id}. Current solo points: ${beforeSoloPoints}`);
+                    
+                    // Refund the solo point to the user
+                    await connection.execute(`
+                        UPDATE users 
+                        SET points = points + 1, solo_points = solo_points + 1 
+                        WHERE id = ?
+                    `, [reservation.user_id]);
+                } else if (reservation.reservation_type === 'group') {
+                    console.log(`Refunding 1 team point to user ID: ${reservation.user_id}. Current team points: ${beforeTeamPoints}`);
+                    
+                    // Refund the team point to the user
+                    await connection.execute(`
+                        UPDATE users 
+                        SET points = points + 1, team_points = team_points + 1 
+                        WHERE id = ?
+                    `, [reservation.user_id]);
+                }
                 
-                // Refund the solo point to the user
-                await connection.execute(`
-                    UPDATE users 
-                    SET points = points + 1, solo_points = solo_points + 1 
-                    WHERE id = ?
-                `, [reservation.user_id]);
-            } else if (reservation.reservation_type === 'group') {
-                console.log(`Refunding 1 team point to user ID: ${reservation.user_id}. Current team points: ${beforeTeamPoints}`);
+                console.log(`Point refund query executed for user ${reservation.user_id}`);
                 
-                // Refund the team point to the user
-                await connection.execute(`
-                    UPDATE users 
-                    SET points = points + 1, team_points = team_points + 1 
-                    WHERE id = ?
-                `, [reservation.user_id]);
-            }
-            
-            console.log(`Point refund query executed for user ${reservation.user_id}`);
-            
-            // Get updated points for response
-            const [pointsResult] = await connection.execute('SELECT points, solo_points, team_points FROM users WHERE id = ?', [reservation.user_id]);
-            const afterPoints = pointsResult[0]?.points || 0;
-            const afterSoloPoints = pointsResult[0]?.solo_points || 0;
-            const afterTeamPoints = pointsResult[0]?.team_points || 0;
-            
-            console.log(`Points updated from ${beforePoints} to ${afterPoints} for user ${reservation.user_id}`);
-            console.log(`SoloPoints updated from ${beforeSoloPoints} to ${afterSoloPoints} for user ${reservation.user_id}`);
-            console.log(`TeamPoints updated from ${beforeTeamPoints} to ${afterTeamPoints} for user ${reservation.user_id}`);
-            
-            reservation.refunded_points = 1;
-            reservation.updated_points = afterPoints;
-            reservation.updated_solo_points = afterSoloPoints;
-            reservation.updated_team_points = afterTeamPoints;
-            
-            if (reservation.reservation_type === 'individual') {
-                reservation.refunded_solo_points = 1;
-                reservation.refunded_team_points = 0;
-            } else {
+                // Get updated points for response
+                const [pointsResult] = await connection.execute('SELECT points, solo_points, team_points FROM users WHERE id = ?', [reservation.user_id]);
+                const afterPoints = pointsResult[0]?.points || 0;
+                const afterSoloPoints = pointsResult[0]?.solo_points || 0;
+                const afterTeamPoints = pointsResult[0]?.team_points || 0;
+                
+                console.log(`Points updated from ${beforePoints} to ${afterPoints} for user ${reservation.user_id}`);
+                console.log(`SoloPoints updated from ${beforeSoloPoints} to ${afterSoloPoints} for user ${reservation.user_id}`);
+                console.log(`TeamPoints updated from ${beforeTeamPoints} to ${afterTeamPoints} for user ${reservation.user_id}`);
+                
+                reservation.refunded_points = 1;
+                reservation.updated_points = afterPoints;
+                reservation.updated_solo_points = afterSoloPoints;
+                reservation.updated_team_points = afterTeamPoints;
+                
+                if (reservation.reservation_type === 'individual') {
+                    reservation.refunded_solo_points = 1;
+                    reservation.refunded_team_points = 0;
+                } else {
+                    reservation.refunded_solo_points = 0;
+                    reservation.refunded_team_points = 1;
+                }
+            } else if (reservation.session_type === 'bilan') {
+                console.log(`Bilan session cancellation - no points to refund for user ${reservation.user_id}`);
+                
+                // Still get current points for response consistency
+                const [pointsResult] = await connection.execute('SELECT points, solo_points, team_points FROM users WHERE id = ?', [reservation.user_id]);
+                
+                reservation.refunded_points = 0;
+                reservation.updated_points = pointsResult[0]?.points || 0;
+                reservation.updated_solo_points = pointsResult[0]?.solo_points || 0;
+                reservation.updated_team_points = pointsResult[0]?.team_points || 0;
                 reservation.refunded_solo_points = 0;
-                reservation.refunded_team_points = 1;
+                reservation.refunded_team_points = 0;
             }
         } else if (!reservation.user_id) {
             console.log('No user_id associated with this reservation, skipping point refund');
@@ -584,28 +631,43 @@ router.post('/reservations/client/cancel/:id', async (req, res) => {
         const beforeSoloPoints = currentPoints[0]?.solo_points || 0;
         const beforeTeamPoints = currentPoints[0]?.team_points || 0;
         
-        // Check reservation type to determine which points to refund
-        if (reservation.reservation_type === 'individual') {
-            console.log(`Refunding 1 solo point to user ID: ${userId}. Current solo points: ${beforeSoloPoints}`);
-            
-            // Refund the solo point to the user
-            await connection.execute(`
-                UPDATE users 
-                SET points = points + 1, solo_points = solo_points + 1 
-                WHERE id = ?
-            `, [userId]);
-        } else if (reservation.reservation_type === 'group') {
-            console.log(`Refunding 1 team point to user ID: ${userId}. Current team points: ${beforeTeamPoints}`);
-            
-            // Refund the team point to the user
-            await connection.execute(`
-                UPDATE users 
-                SET points = points + 1, team_points = team_points + 1 
-                WHERE id = ?
-            `, [userId]);
-        }
+        let pointsRefunded = 0;
+        let soloPointsRefunded = 0;
+        let teamPointsRefunded = 0;
         
-        console.log(`Point refund query executed for user ${userId}`);
+        // Only refund points if this was a paid session (normal sessions)
+        if (reservation.session_type === 'normal') {
+            // Check reservation type to determine which points to refund
+            if (reservation.reservation_type === 'individual') {
+                console.log(`Refunding 1 solo point to user ID: ${userId}. Current solo points: ${beforeSoloPoints}`);
+                
+                // Refund the solo point to the user
+                await connection.execute(`
+                    UPDATE users 
+                    SET points = points + 1, solo_points = solo_points + 1 
+                    WHERE id = ?
+                `, [userId]);
+                
+                pointsRefunded = 1;
+                soloPointsRefunded = 1;
+            } else if (reservation.reservation_type === 'group') {
+                console.log(`Refunding 1 team point to user ID: ${userId}. Current team points: ${beforeTeamPoints}`);
+                
+                // Refund the team point to the user
+                await connection.execute(`
+                    UPDATE users 
+                    SET points = points + 1, team_points = team_points + 1 
+                    WHERE id = ?
+                `, [userId]);
+                
+                pointsRefunded = 1;
+                teamPointsRefunded = 1;
+            }
+            
+            console.log(`Point refund query executed for user ${userId}`);
+        } else if (reservation.session_type === 'bilan') {
+            console.log(`Bilan session cancellation - no points to refund for user ${userId}`);
+        }
         
         // Get updated points for response
         const [pointsResult] = await connection.execute('SELECT points, solo_points, team_points FROM users WHERE id = ?', [userId]);
@@ -637,12 +699,13 @@ router.post('/reservations/client/cancel/:id', async (req, res) => {
             coach_id: reservation.coach_id,
             date: reservation.date,
             time: reservation.time,
+            session_type: reservation.session_type,
             slot_id: reservation.availability_id,
             client_name: reservation.full_name,
             client_email: reservation.email,
-            refunded_points: 1,
-            refunded_solo_points: reservation.reservation_type === 'individual' ? 1 : 0,
-            refunded_team_points: reservation.reservation_type === 'group' ? 1 : 0,
+            refunded_points: pointsRefunded,
+            refunded_solo_points: soloPointsRefunded,
+            refunded_team_points: teamPointsRefunded,
             updated_points: afterPoints,
             updated_solo_points: afterSoloPoints,
             updated_team_points: afterTeamPoints,

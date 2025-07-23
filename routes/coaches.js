@@ -24,13 +24,17 @@ router.get('/', async (req, res) => {
 router.get('/:id/availability', async (req, res) => {
     try {
         const coachId = req.params.id;
-        console.log(`\n=== AVAILABILITY ENDPOINT: Fetching AVAILABLE slots for coach ${coachId} (client view) ===`);
+        const sessionType = req.query.session_type || 'normal'; // Default to normal if not specified
+        
+        console.log(`\n=== AVAILABILITY ENDPOINT: Fetching AVAILABLE ${sessionType} slots for coach ${coachId} (client view) ===`);
+        console.log(`🔍 DEBUG: Requested session_type parameter: "${req.query.session_type}"`);
+        console.log(`🔍 DEBUG: Resolved sessionType variable: "${sessionType}"`);
         
         // Get the coach name for better logging
         const [coach] = await db.execute('SELECT name FROM coaches WHERE id = ?', [coachId]);
         const coachName = coach.length > 0 ? coach[0].name : 'Unknown Coach';
         
-        console.log(`Coach: ${coachName} (ID: ${coachId})`);
+        console.log(`Coach: ${coachName} (ID: ${coachId}), Session Type: ${sessionType}`);
         
         // Get current date and time
         const now = new Date();
@@ -39,7 +43,7 @@ router.get('/:id/availability', async (req, res) => {
         
         console.log(`Current date: ${currentDate}, Current time: ${currentTime}`);
         
-        // Only show available slots that are in the future (not in the past)
+        // Only show available slots that are in the future (not in the past) and match the session type
         // Filter out slots that are on past dates OR on today but past the current time
         const [availability] = await db.execute(`
             SELECT 
@@ -49,26 +53,29 @@ router.get('/:id/availability', async (req, res) => {
                 ca.start_time, 
                 ca.end_time, 
                 ca.is_booked, 
+                ca.session_type,
+                ca.duration,
                 c.name
             FROM coach_availability ca
             JOIN coaches c ON ca.coach_id = c.id
             WHERE ca.coach_id = ? 
             AND ca.is_booked = 0
+            AND ca.session_type = ?
             AND (
                 ca.date > ? 
                 OR (ca.date = ? AND ca.start_time > ?)
             )
             ORDER BY ca.date, ca.start_time
-        `, [coachId, currentDate, currentDate, currentTime]);
+        `, [coachId, sessionType, currentDate, currentDate, currentTime]);
         
-        console.log(`Found ${availability.length} available future slots for coach ${coachId} (filtered past slots)`);
+        console.log(`Found ${availability.length} available future ${sessionType} slots for coach ${coachId} (filtered past slots)`);
         
         if (availability.length === 0) {
-            console.log('No available future time slots found for this coach');
+            console.log(`No available future ${sessionType} time slots found for this coach`);
         } else {
-            console.log('Available future slots for this coach:');
+            console.log(`Available future ${sessionType} slots for this coach:`);
             availability.forEach(slot => {
-                console.log(`- ${slot.date} ${slot.start_time}-${slot.end_time} (ID: ${slot.id})`);
+                console.log(`- ${slot.date} ${slot.start_time}-${slot.end_time} (${slot.session_type}, ${slot.duration}min, ID: ${slot.id})`);
             });
         }
         
@@ -104,6 +111,9 @@ router.get('/:id/all-availability', async (req, res) => {
                 ca.start_time, 
                 ca.end_time, 
                 ca.is_booked,
+                ca.duration,
+                ca.session_type,
+                ca.is_free,
                 CASE 
                     WHEN ca.date < ? THEN 1
                     WHEN ca.date = ? AND ca.start_time < ? THEN 1
@@ -111,7 +121,7 @@ router.get('/:id/all-availability', async (req, res) => {
                 END as is_past
             FROM coach_availability ca
             WHERE ca.coach_id = ? 
-            ORDER BY ca.date, ca.start_time
+            ORDER BY ca.date, ca.start_time, ca.session_type
         `, [currentDate, currentDate, currentTime, coachId]);
         
         console.log(`Found ${availability.length} total slots for coach ${coachId} (no date filtering)`);
@@ -233,13 +243,13 @@ router.post('/', async (req, res) => {
     }
 });
 
-// Add availability for a coach
+// Add availability for a coach - supports both normal and bilan sessions
 router.post('/:id/availability', async (req, res) => {
     const connection = await db.getConnection();
     
     try {
         const coachId = req.params.id;
-        const { date, start_time, end_time } = req.body;
+        const { date, start_time, end_time, session_types = ['normal', 'bilan'] } = req.body;
         
         // Validate required fields
         if (!date || !start_time || !end_time) {
@@ -261,81 +271,143 @@ router.post('/:id/availability', async (req, res) => {
 
         await connection.beginTransaction();
 
+        // First, verify that the coach exists
+        const [coachCheck] = await connection.execute(
+            'SELECT id, name FROM coaches WHERE id = ?',
+            [coachId]
+        );
+
+        if (coachCheck.length === 0) {
+            connection.release();
+            return res.status(404).json({ 
+                error: `Coach with ID ${coachId} not found. Please select a valid coach.` 
+            });
+        }
+
+        console.log(`Coach verified: ${coachCheck[0].name} (ID: ${coachId})`);
+
         const slots = [];
         const startDateTime = new Date(`${date}T${start_time}`);
         const endDateTime = new Date(`${date}T${end_time}`);
-        const SLOT_DURATION = 55; // minutes
 
-        // Generate regular slots (starting on the hour)
-        let currentSlot = new Date(startDateTime);
-        while (currentSlot < endDateTime) {
-            const potentialEndSlot = new Date(currentSlot.getTime() + SLOT_DURATION * 60000);
-            // Only add the slot if it ends before or at the specified end time
-            if (potentialEndSlot <= endDateTime) {
-                const slotStart = currentSlot.toTimeString().slice(0, 8);
-                const slotEnd = potentialEndSlot.toTimeString().slice(0, 8);
+        console.log(`\n=== CREATING TIME SLOTS FOR COACH ${coachId} ===`);
+        console.log(`Date: ${date}, Time: ${start_time} - ${end_time}`);
+        console.log(`Session types: ${session_types.join(', ')}`);
 
-                slots.push({
-                    start: slotStart,
-                    end: slotEnd,
-                    isDerived: false
-                });
+        // Generate normal slots (55 minutes) if requested
+        if (session_types.includes('normal')) {
+            console.log('Generating normal (55min) slots...');
+            let currentSlot = new Date(startDateTime);
+            while (currentSlot < endDateTime) {
+                const potentialEndSlot = new Date(currentSlot.getTime() + 55 * 60000); // 55 minutes
+                
+                // Only add the slot if it ends before or at the specified end time
+                if (potentialEndSlot <= endDateTime) {
+                    const slotStart = currentSlot.toTimeString().slice(0, 8);
+                    const slotEnd = potentialEndSlot.toTimeString().slice(0, 8);
+
+                    slots.push({
+                        start: slotStart,
+                        end: slotEnd,
+                        session_type: 'normal',
+                        duration: 55,
+                        isDerived: currentSlot.getMinutes() === 30 // Half-hour start = derived
+                    });
+                }
+
+                // Move to next 30 minutes (allows both X:00 and X:30 starts)
+                currentSlot.setMinutes(currentSlot.getMinutes() + 30);
             }
-
-            // Move to next hour
-            currentSlot.setHours(currentSlot.getHours() + 1);
-            currentSlot.setMinutes(0);
         }
 
-        // Generate half-hour slots
-        currentSlot = new Date(startDateTime);
-        currentSlot.setMinutes(30); // Start at half past
-        while (currentSlot < endDateTime) {
-            const potentialEndSlot = new Date(currentSlot.getTime() + SLOT_DURATION * 60000);
-            // Only add the slot if it ends before or at the specified end time
-            if (potentialEndSlot <= endDateTime) {
-                const slotStart = currentSlot.toTimeString().slice(0, 8);
-                const slotEnd = potentialEndSlot.toTimeString().slice(0, 8);
+        // Generate bilan slots (30 minutes) if requested
+        if (session_types.includes('bilan')) {
+            console.log('Generating bilan (30min) slots...');
+            let currentSlot = new Date(startDateTime);
+            while (currentSlot < endDateTime) {
+                const potentialEndSlot = new Date(currentSlot.getTime() + 30 * 60000); // 30 minutes
+                
+                // Only add the slot if it ends before or at the specified end time
+                if (potentialEndSlot <= endDateTime) {
+                    const slotStart = currentSlot.toTimeString().slice(0, 8);
+                    const slotEnd = potentialEndSlot.toTimeString().slice(0, 8);
 
-                slots.push({
-                    start: slotStart,
-                    end: slotEnd,
-                    isDerived: true
-                });
+                    slots.push({
+                        start: slotStart,
+                        end: slotEnd,
+                        session_type: 'bilan',
+                        duration: 30,
+                        isDerived: false // Bilan slots are not derived, they're primary
+                    });
+                }
+
+                // Move to next 30 minutes
+                currentSlot.setMinutes(currentSlot.getMinutes() + 30);
             }
-
-            // Move to next hour
-            currentSlot.setHours(currentSlot.getHours() + 1);
-            currentSlot.setMinutes(30);
         }
+
+        console.log(`Generated ${slots.length} total slots`);
 
         // Insert all slots
         const createdSlots = [];
         for (const slot of slots) {
-            const [result] = await connection.execute(
-                'INSERT INTO coach_availability (coach_id, date, start_time, end_time, duration, is_derived) VALUES (?, ?, ?, ?, ?, ?)',
-                [coachId, date, slot.start, slot.end, SLOT_DURATION, slot.isDerived]
+            // Check if slot already exists
+            const [existingSlot] = await connection.execute(
+                'SELECT id FROM coach_availability WHERE coach_id = ? AND date = ? AND start_time = ? AND end_time = ? AND session_type = ?',
+                [coachId, date, slot.start, slot.end, slot.session_type]
             );
+            
+            if (existingSlot.length === 0) {
+                const [result] = await connection.execute(
+                    'INSERT INTO coach_availability (coach_id, date, start_time, end_time, duration, is_derived, session_type, is_free) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    [coachId, date, slot.start, slot.end, slot.duration, slot.isDerived, slot.session_type, slot.session_type === 'bilan']
+                );
 
-            createdSlots.push({ 
-                id: result.insertId,
-                coach_id: coachId,
-                date,
-                start_time: slot.start,
-                end_time: slot.end,
-                is_booked: 0,
-                is_derived: slot.isDerived,
-                duration: SLOT_DURATION
-            });
+                createdSlots.push({ 
+                    id: result.insertId,
+                    coach_id: parseInt(coachId),
+                    date,
+                    start_time: slot.start,
+                    end_time: slot.end,
+                    is_booked: 0,
+                    is_derived: slot.isDerived,
+                    duration: slot.duration,
+                    session_type: slot.session_type
+                });
+                
+                console.log(`Created ${slot.session_type} slot: ${slot.start}-${slot.end}`);
+            } else {
+                console.log(`Skipped existing ${slot.session_type} slot: ${slot.start}-${slot.end}`);
+            }
         }
 
         await connection.commit();
         connection.release();
         
+        console.log(`=== FINISHED CREATING ${createdSlots.length} NEW TIME SLOTS ===\n`);
         res.status(201).json(createdSlots);
     } catch (error) {
+        if (connection) {
+            try {
+                await connection.rollback();
+            } catch (rollbackError) {
+                console.error('Error during rollback:', rollbackError);
+            }
+            connection.release();
+        }
         console.error('Error adding availability:', error);
-        res.status(500).json({ error: 'Failed to add availability' });
+        console.error('Error stack:', error.stack);
+        console.error('Error details:', {
+            message: error.message,
+            code: error.code,
+            errno: error.errno,
+            sqlMessage: error.sqlMessage
+        });
+        res.status(500).json({ 
+            error: 'Failed to add availability',
+            details: error.message,
+            sqlError: error.sqlMessage
+        });
     }
 });
 
@@ -807,7 +879,8 @@ router.post('/bulk-availability', async (req, res) => {
             start_time, 
             end_time, 
             days_of_week, 
-            repeat_for_weeks 
+            repeat_for_weeks,
+            session_types = ['normal'] // Default to normal if not provided
         } = req.body;
         
         // Validate required fields
@@ -815,6 +888,23 @@ router.post('/bulk-availability', async (req, res) => {
             connection.release();
             return res.status(400).json({ 
                 error: 'Coach ID, date range, time range, and days of week are required' 
+            });
+        }
+        
+        // Validate session_types
+        if (!session_types || session_types.length === 0) {
+            connection.release();
+            return res.status(400).json({ 
+                error: 'At least one session type must be selected' 
+            });
+        }
+        
+        const validSessionTypes = ['normal', 'bilan'];
+        const invalidTypes = session_types.filter(type => !validSessionTypes.includes(type));
+        if (invalidTypes.length > 0) {
+            connection.release();
+            return res.status(400).json({ 
+                error: `Invalid session types: ${invalidTypes.join(', ')}. Valid types are: ${validSessionTypes.join(', ')}` 
             });
         }
         
@@ -841,7 +931,6 @@ router.post('/bulk-availability', async (req, res) => {
         await connection.beginTransaction();
 
         const createdSlots = [];
-        const SLOT_DURATION = 55; // minutes
         
         // Calculate the end date based on repeat_for_weeks
         const startDateObj = new Date(start_date);
@@ -851,6 +940,8 @@ router.post('/bulk-availability', async (req, res) => {
         
         // Use the smaller of the provided end_date or calculated final end date
         const actualEndDate = endDateObj < finalEndDate ? endDateObj : finalEndDate;
+        
+        console.log(`Creating slots for session types: ${session_types.join(', ')}`);
         
         // Iterate through each day in the date range
         let iterationDate = new Date(startDateObj);
@@ -864,78 +955,41 @@ router.post('/bulk-availability', async (req, res) => {
                 
                 // Skip if this date is in the past
                 if (dateStr >= currentDateStr || (dateStr === currentDateStr && start_time >= currentTime)) {
-                    // Generate slots for this day
-                    const slots = [];
-                    const startDateTime = new Date(`${dateStr}T${start_time}`);
-                    const endDateTime = new Date(`${dateStr}T${end_time}`);
-
-                    // Generate regular slots (starting on the hour)
-                    let currentSlot = new Date(startDateTime);
-                    while (currentSlot < endDateTime) {
-                        const potentialEndSlot = new Date(currentSlot.getTime() + SLOT_DURATION * 60000);
-                        // Only add the slot if it ends before or at the specified end time
-                        if (potentialEndSlot <= endDateTime) {
-                            const slotStart = currentSlot.toTimeString().slice(0, 8);
-                            const slotEnd = potentialEndSlot.toTimeString().slice(0, 8);
-
-                            slots.push({
-                                start: slotStart,
-                                end: slotEnd,
-                                isDerived: false
-                            });
-                        }
-
-                        // Move to next hour
-                        currentSlot.setHours(currentSlot.getHours() + 1);
-                        currentSlot.setMinutes(0);
-                    }
-
-                    // Generate half-hour slots
-                    currentSlot = new Date(startDateTime);
-                    currentSlot.setMinutes(30); // Start at half past
-                    while (currentSlot < endDateTime) {
-                        const potentialEndSlot = new Date(currentSlot.getTime() + SLOT_DURATION * 60000);
-                        // Only add the slot if it ends before or at the specified end time
-                        if (potentialEndSlot <= endDateTime) {
-                            const slotStart = currentSlot.toTimeString().slice(0, 8);
-                            const slotEnd = potentialEndSlot.toTimeString().slice(0, 8);
-
-                            slots.push({
-                                start: slotStart,
-                                end: slotEnd,
-                                isDerived: true
-                            });
-                        }
-
-                        // Move to next hour
-                        currentSlot.setHours(currentSlot.getHours() + 1);
-                        currentSlot.setMinutes(30);
-                    }
-
-                    // Insert all slots for this day
-                    for (const slot of slots) {
-                        // Check if slot already exists
-                        const [existingSlot] = await connection.execute(
-                            'SELECT id FROM coach_availability WHERE coach_id = ? AND date = ? AND start_time = ? AND end_time = ?',
-                            [coach_id, dateStr, slot.start, slot.end]
-                        );
+                    
+                    // Create slots for each session type
+                    for (const sessionType of session_types) {
+                        console.log(`Generating ${sessionType} slots for ${dateStr}`);
                         
-                        if (existingSlot.length === 0) {
-                            const [result] = await connection.execute(
-                                'INSERT INTO coach_availability (coach_id, date, start_time, end_time, duration, is_derived) VALUES (?, ?, ?, ?, ?, ?)',
-                                [coach_id, dateStr, slot.start, slot.end, SLOT_DURATION, slot.isDerived]
+                        // Generate time slots using the generateTimeSlots function
+                        const { generateTimeSlots } = require('../utils/availabilityHelpers');
+                        const generatedSlots = generateTimeSlots(start_time, end_time, sessionType);
+                        
+                        // Insert all slots for this day and session type
+                        for (const slot of generatedSlots) {
+                            // Check if slot already exists
+                            const [existingSlot] = await connection.execute(
+                                'SELECT id FROM coach_availability WHERE coach_id = ? AND date = ? AND start_time = ? AND end_time = ? AND session_type = ?',
+                                [coach_id, dateStr, slot.start_time, slot.end_time, sessionType]
                             );
+                            
+                            if (existingSlot.length === 0) {
+                                const [result] = await connection.execute(
+                                    'INSERT INTO coach_availability (coach_id, date, start_time, end_time, duration, session_type, is_free) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                                    [coach_id, dateStr, slot.start_time, slot.end_time, slot.duration, sessionType, sessionType === 'bilan']
+                                );
 
-                            createdSlots.push({ 
-                                id: result.insertId,
-                                coach_id: parseInt(coach_id),
-                                date: dateStr,
-                                start_time: slot.start,
-                                end_time: slot.end,
-                                is_booked: 0,
-                                is_derived: slot.isDerived,
-                                duration: SLOT_DURATION
-                            });
+                                createdSlots.push({ 
+                                    id: result.insertId,
+                                    coach_id: parseInt(coach_id),
+                                    date: dateStr,
+                                    start_time: slot.start_time,
+                                    end_time: slot.end_time,
+                                    is_booked: 0,
+                                    session_type: sessionType,
+                                    duration: slot.duration,
+                                    is_free: sessionType === 'bilan'
+                                });
+                            }
                         }
                     }
                 }
@@ -948,7 +1002,7 @@ router.post('/bulk-availability', async (req, res) => {
         await connection.commit();
         connection.release();
         
-        console.log(`Bulk availability created: ${createdSlots.length} slots for coach ${coach_id}`);
+        console.log(`Bulk availability created: ${createdSlots.length} slots for coach ${coach_id} (Session types: ${session_types.join(', ')})`);
         res.status(201).json(createdSlots);
         
     } catch (error) {

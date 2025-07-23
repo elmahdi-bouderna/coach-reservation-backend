@@ -87,30 +87,50 @@ const sendReservationConfirmation = async (reservation) => {
     // Format time using Morocco standards (24-hour format)
     const formattedTime = `${hours}:${minutes}`;
     
+    // Determine session type details
+    const sessionTypeInfo = reservation.session_type === 'bilan' ? {
+      title: '🎯 Votre séance bilan est confirmée !',
+      sessionType: 'Séance bilan',
+      duration: '25 minutes',
+      pointsUsed: 'Gratuit',
+      pointsDisplay: `<p><strong>Type :</strong> ${reservation.session_type === 'bilan' ? 'Séance bilan (gratuite)' : 'Séance normale'}</p>
+            <p><strong>Durée :</strong> ${reservation.session_type === 'bilan' ? '25 minutes' : '55 minutes'}</p>
+            ${reservation.session_type !== 'bilan' ? `<p><strong>Points utilisés :</strong> 1</p>
+            <p><strong>Points restants :</strong> ${reservation.remaining_points}</p>` : '<p><strong>Coût :</strong> Gratuit</p>'}`
+    } : {
+      title: '🏆 Votre séance de coaching est confirmée !',
+      sessionType: 'Séance normale',
+      duration: '55 minutes',
+      pointsUsed: '1',
+      pointsDisplay: `<p><strong>Type :</strong> Séance normale</p>
+            <p><strong>Durée :</strong> 55 minutes</p>
+            <p><strong>Points utilisés :</strong> 1</p>
+            <p><strong>Points restants :</strong> ${reservation.remaining_points}</p>`
+    };
+    
     // Email content
     const mailOptions = {
       from: `"Suite Coaching" <${process.env.EMAIL_USER}>`,
       to: reservation.email,
-      subject: '🏆 Votre séance de coaching est confirmée !',
+      subject: sessionTypeInfo.title,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
           <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #00E5FF;">Votre séance de coaching est confirmée !</h1>
+            <h1 style="color: #00E5FF;">${sessionTypeInfo.title}</h1>
           </div>
           
           <p>Bonjour <strong>${reservation.full_name}</strong>,</p>
           
-          <p>Excellente nouvelle ! Votre séance de coaching a été réservée avec succès. Voici les détails :</p>
+          <p>Excellente nouvelle ! Votre ${reservation.session_type === 'bilan' ? 'séance bilan' : 'séance de coaching'} a été réservée avec succès. Voici les détails :</p>
           
           <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
             <p><strong>Coach :</strong> ${reservation.coach_name}</p>
             <p><strong>Date :</strong> ${formattedDate}</p>
             <p><strong>Heure :</strong> ${formattedTime}</p>
-            <p><strong>Points utilisés :</strong> 1</p>
-            <p><strong>Points restants :</strong> ${reservation.remaining_points}</p>
+            ${sessionTypeInfo.pointsDisplay}
           </div>
           
-          <p>Veuillez arriver 5 minutes avant l'heure prévue. Si vous devez reporter ou annuler, veuillez nous contacter au moins 6 heures à l'avance.</p>
+          <p>Veuillez arriver 5 minutes avant l'heure prévue. ${reservation.session_type === 'bilan' ? 'Cette séance bilan gratuite vous permettra d\'évaluer vos besoins et objectifs.' : 'Si vous devez reporter ou annuler, veuillez nous contacter au moins 6 heures à l\'avance.'}</p>
           
           <p>Nous avons hâte de vous aider à atteindre vos objectifs !</p>
           
@@ -182,29 +202,42 @@ const sendCoachNotification = async (reservation, coachEmail) => {
     // Format time using Morocco standards (24-hour format)
     const formattedTime = `${hours}:${minutes}`;
     
+    // Determine session type details for coach notification
+    const sessionTypeInfo = reservation.session_type === 'bilan' ? {
+      title: '🎯 Nouvelle séance bilan réservée',
+      sessionType: 'Séance bilan (gratuite)',
+      duration: '25 minutes'
+    } : {
+      title: '🔔 Nouvelle séance de coaching réservée',
+      sessionType: 'Séance normale',
+      duration: '55 minutes'
+    };
+    
     // Email content
     const mailOptions = {
       from: `"Système Suite Coaching" <${process.env.EMAIL_USER}>`,
       to: coachEmail,
-      subject: '🔔 Nouvelle séance de coaching réservée',
+      subject: sessionTypeInfo.title,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
           <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #00E5FF;">Nouvelle séance réservée</h1>
+            <h1 style="color: #00E5FF;">${sessionTypeInfo.title}</h1>
           </div>
           
           <p>Bonjour <strong>${reservation.coach_name}</strong>,</p>
 
-          <p>Une nouvelle séance de coaching a été réservée avec vous :</p>
+          <p>Une nouvelle ${reservation.session_type === 'bilan' ? 'séance bilan' : 'séance de coaching'} a été réservée avec vous :</p>
           
           <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
             <p><strong>Client :</strong> ${reservation.full_name}</p>
             <p><strong>Email du client :</strong> ${reservation.email}</p>
             <p><strong>Date :</strong> ${formattedDate}</p>
             <p><strong>Heure :</strong> ${formattedTime}</p>
+            <p><strong>Type de séance :</strong> ${sessionTypeInfo.sessionType}</p>
+            <p><strong>Durée :</strong> ${sessionTypeInfo.duration}</p>
           </div>
           
-          <p>Veuillez noter ce rendez-vous dans votre calendrier. Si vous devez reporter, veuillez contacter le client directement.</p>
+          <p>Veuillez noter ce rendez-vous dans votre calendrier. ${reservation.session_type === 'bilan' ? 'Il s\'agit d\'une séance bilan gratuite de 25 minutes pour évaluer les besoins du client.' : 'Si vous devez reporter, veuillez contacter le client directement.'}</p>
           
           <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; font-size: 12px; color: #777;">
             <p>Ceci est un message automatique du système de réservation Suite Coaching.</p>

@@ -26,6 +26,8 @@ router.get('/admin/reservations', verifyToken, verifyAdmin, asyncHandler(async (
             r.cancelled_at,
             r.cancelled_by,
             r.user_id,
+            r.session_type,
+            r.is_free,
             c.name as coach_name,
             c.specialty
         FROM reservations r
@@ -774,6 +776,8 @@ router.get('/admin/planning/reservations', async (req, res) => {
                 r.full_name as client_name,
                 r.email as client_email,
                 r.phone as client_phone,
+                r.session_type,
+                r.is_free,
                 r.created_at,
                 c.name as coach_name,
                 c.photo as profile_image,
