@@ -92,11 +92,11 @@ const sendReservationConfirmation = async (reservation) => {
       title: '🎯 Votre séance bilan est confirmée !',
       sessionType: 'Séance bilan',
       duration: '25 minutes',
-      pointsUsed: 'Gratuit',
-      pointsDisplay: `<p><strong>Type :</strong> ${reservation.session_type === 'bilan' ? 'Séance bilan (gratuite)' : 'Séance normale'}</p>
+      pointsUsed: '',
+      pointsDisplay: `<p><strong>Type :</strong> ${reservation.session_type === 'bilan' ? 'Séance bilan' : 'Séance normale'}</p>
             <p><strong>Durée :</strong> ${reservation.session_type === 'bilan' ? '25 minutes' : '55 minutes'}</p>
             ${reservation.session_type !== 'bilan' ? `<p><strong>Points utilisés :</strong> 1</p>
-            <p><strong>Points restants :</strong> ${reservation.remaining_points}</p>` : '<p><strong>Coût :</strong> Gratuit</p>'}`
+            <p><strong>Points restants :</strong> ${reservation.remaining_points}</p>` : ''}`
     } : {
       title: '🏆 Votre séance de coaching est confirmée !',
       sessionType: 'Séance normale',
@@ -130,7 +130,7 @@ const sendReservationConfirmation = async (reservation) => {
             ${sessionTypeInfo.pointsDisplay}
           </div>
           
-          <p>Veuillez arriver 5 minutes avant l'heure prévue. ${reservation.session_type === 'bilan' ? 'Cette séance bilan gratuite vous permettra d\'évaluer vos besoins et objectifs.' : 'Si vous devez reporter ou annuler, veuillez nous contacter au moins 6 heures à l\'avance.'}</p>
+          <p>Veuillez arriver 5 minutes avant l'heure prévue. ${reservation.session_type === 'bilan' ? 'Cette séance bilan vous permettra d\'évaluer vos besoins et objectifs.' : 'Si vous devez reporter ou annuler, veuillez nous contacter au moins 6 heures à l\'avance.'}</p>
           
           <p>Nous avons hâte de vous aider à atteindre vos objectifs !</p>
           
@@ -205,7 +205,7 @@ const sendCoachNotification = async (reservation, coachEmail) => {
     // Determine session type details for coach notification
     const sessionTypeInfo = reservation.session_type === 'bilan' ? {
       title: '🎯 Nouvelle séance bilan réservée',
-      sessionType: 'Séance bilan (gratuite)',
+      sessionType: 'Séance bilan',
       duration: '25 minutes'
     } : {
       title: '🔔 Nouvelle séance de coaching réservée',
@@ -237,7 +237,7 @@ const sendCoachNotification = async (reservation, coachEmail) => {
             <p><strong>Durée :</strong> ${sessionTypeInfo.duration}</p>
           </div>
           
-          <p>Veuillez noter ce rendez-vous dans votre calendrier. ${reservation.session_type === 'bilan' ? 'Il s\'agit d\'une séance bilan gratuite de 25 minutes pour évaluer les besoins du client.' : 'Si vous devez reporter, veuillez contacter le client directement.'}</p>
+          <p>Veuillez noter ce rendez-vous dans votre calendrier. ${reservation.session_type === 'bilan' ? 'Il s\'agit d\'une séance bilan de 25 minutes pour évaluer les besoins du client.' : 'Si vous devez reporter, veuillez contacter le client directement.'}</p>
           
           <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; font-size: 12px; color: #777;">
             <p>Ceci est un message automatique du système de réservation Suite Coaching.</p>

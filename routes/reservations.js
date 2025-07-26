@@ -262,7 +262,7 @@ router.post('/reserve', async (req, res) => {
         
         // Send the successful response immediately with custom message for bilan
         const responseMessage = session_type === 'bilan' 
-            ? 'Votre séance bilan (25 minutes) a été réservée avec succès! Cette séance est gratuite.'
+            ? 'Votre séance bilan (25 minutes) a été réservée avec succès!'
             : 'Votre réservation a été confirmée avec succès!';
             
         res.status(201).json({
