@@ -10,7 +10,7 @@ const poolConfig = {
     port: process.env.DB_PORT || 3306,
     timezone: '+01:00',
     waitForConnections: true,
-    connectionLimit: 5, // Reduced for free hosting
+    connectionLimit: 3, // Further reduced for Heroku + free hosting
     queueLimit: 0,
     // Handle connection issues gracefully
     ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
@@ -78,9 +78,9 @@ const warmConnection = async () => {
     }
 };
 
-// Warm the connection on startup and every 4 minutes
+// Warm the connection on startup and every 10 minutes (reduced frequency for free hosting)
 warmConnection();
-setInterval(warmConnection, 4 * 60 * 1000); // Every 4 minutes
+setInterval(warmConnection, 10 * 60 * 1000); // Every 10 minutes
 
 // Handle pool errors
 pool.on('connection', (connection) => {

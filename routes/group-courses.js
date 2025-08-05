@@ -5,7 +5,9 @@ const { verifyToken, verifyAdmin } = require('./auth');
 
 // Get all active group courses (public route)
 router.get('/', async (req, res) => {
+    console.log('Group courses endpoint accessed - starting query...');
     try {
+        console.log('Executing group courses query...');
         const [courses] = await db.execute(`
             SELECT gc.*, c.name as coach_name, c.specialty, c.photo,
                    (SELECT COUNT(*) FROM group_reservations gr WHERE gr.course_id = gc.id AND gr.status = 'confirmed') as current_participants
@@ -14,10 +16,16 @@ router.get('/', async (req, res) => {
             WHERE gc.is_active = 1
             ORDER BY gc.date ASC, gc.time ASC
         `);
-        
+        console.log(`Group courses query successful - found ${courses.length} courses`);
         res.json(courses);
     } catch (error) {
-        console.error('Error fetching group courses:', error);
+        console.error('Error fetching group courses:', {
+            message: error.message,
+            code: error.code,
+            errno: error.errno,
+            fatal: error.fatal,
+            stack: error.stack
+        });
         res.status(500).json({ error: 'Internal server error' });
     }
 });

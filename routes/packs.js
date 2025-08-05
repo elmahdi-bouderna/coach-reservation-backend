@@ -5,11 +5,20 @@ const { verifyToken, verifyAdmin } = require('./auth');
 
 // Get all packs (public route - clients can see all active packs)
 router.get('/', async (req, res) => {
+    console.log('Packs endpoint accessed - starting query...');
     try {
+        console.log('Executing packs query...');
         const [packs] = await db.execute('SELECT * FROM packs WHERE is_active = 1 ORDER BY points ASC');
+        console.log(`Packs query successful - found ${packs.length} packs`);
         res.json(packs);
     } catch (error) {
-        console.error('Error fetching packs:', error);
+        console.error('Error fetching packs:', {
+            message: error.message,
+            code: error.code,
+            errno: error.errno,
+            fatal: error.fatal,
+            stack: error.stack
+        });
         res.status(500).json({ error: 'Internal server error' });
     }
 });
