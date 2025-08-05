@@ -4,7 +4,7 @@ const config = {
   host: 'mysql-swibi.alwaysdata.net',
   user: 'swibi',
   password: 'BK734713@Mehdi',
-  database: 'swibi_coaching_system'
+  database: 'swibi_coaching'
 };
 
 async function checkPaymentSystem() {
@@ -46,7 +46,7 @@ async function checkPaymentSystem() {
         const [result] = await connection.execute(`
           SELECT ROUTINE_NAME 
           FROM INFORMATION_SCHEMA.ROUTINES 
-          WHERE ROUTINE_SCHEMA = 'swibi_coaching_system' 
+          WHERE ROUTINE_SCHEMA = 'swibi_coaching' 
           AND ROUTINE_NAME = ?
         `, [procedure]);
         

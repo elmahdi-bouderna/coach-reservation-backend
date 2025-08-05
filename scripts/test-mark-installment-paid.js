@@ -5,7 +5,7 @@ const config = {
   host: 'mysql-swibi.alwaysdata.net',
   user: 'swibi',
   password: 'BK734713@Mehdi',
-  database: 'swibi_coaching_system'
+  database: 'swibi_coaching'
 };
 
 async function testMarkInstallmentPaid() {
