@@ -161,18 +161,6 @@ server.listen(PORT, '0.0.0.0', async () => {
         const isHealthy = await db.healthCheck();
         if (isHealthy) {
             console.log('✅ Database connection established successfully');
-            
-            // Check and create required tables in production
-            if (process.env.NODE_ENV === 'production') {
-                console.log('🔍 Production mode: Checking required tables...');
-                try {
-                    await checkRequiredTables();
-                    console.log('✅ All required tables are available');
-                } catch (tableError) {
-                    console.error('❌ Table check failed:', tableError.message);
-                    console.log('⚠️  Some API endpoints may not work correctly');
-                }
-            }
         } else {
             console.log('❌ Database connection failed');
         }
@@ -199,22 +187,3 @@ server.listen(PORT, '0.0.0.0', async () => {
     console.log('- GET /api/coach-dashboard/reservations');
     console.log('- GET /api/coach-dashboard/availability');
 });
-
-// Function to check required tables
-async function checkRequiredTables() {
-    const requiredTables = ['packs', 'group_courses', 'group_reservations', 'user_packs'];
-    
-    for (const table of requiredTables) {
-        try {
-            await db.execute(`SELECT 1 FROM ${table} LIMIT 1`);
-            console.log(`✅ Table '${table}' exists`);
-        } catch (error) {
-            if (error.errno === 1146) {
-                console.error(`❌ Missing table: ${table}`);
-                throw new Error(`Required table '${table}' does not exist. Please run database migration.`);
-            } else {
-                throw error;
-            }
-        }
-    }
-}
