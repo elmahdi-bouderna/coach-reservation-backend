@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "init-db": "node scripts/init-db.js"
+    "init-db": "node scripts/init-db.js",
+    "check-env": "node check-env.js",
+    "check-tables": "node scripts/check-tables.js"
   },
   "dependencies": {
     "axios": "^1.10.0",
