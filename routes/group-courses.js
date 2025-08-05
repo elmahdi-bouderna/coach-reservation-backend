@@ -5,9 +5,8 @@ const { verifyToken, verifyAdmin } = require('./auth');
 
 // Get all active group courses (public route)
 router.get('/', async (req, res) => {
-    console.log('Group courses endpoint accessed - starting query...');
     try {
-        console.log('Executing group courses query...');
+        console.log('Fetching active group courses...');
         const [courses] = await db.execute(`
             SELECT gc.*, c.name as coach_name, c.specialty, c.photo,
                    (SELECT COUNT(*) FROM group_reservations gr WHERE gr.course_id = gc.id AND gr.status = 'confirmed') as current_participants
@@ -16,17 +15,32 @@ router.get('/', async (req, res) => {
             WHERE gc.is_active = 1
             ORDER BY gc.date ASC, gc.time ASC
         `);
-        console.log(`Group courses query successful - found ${courses.length} courses`);
+        
+        console.log(`Found ${courses.length} active group courses`);
         res.json(courses);
     } catch (error) {
-        console.error('Error fetching group courses:', {
-            message: error.message,
-            code: error.code,
-            errno: error.errno,
-            fatal: error.fatal,
-            stack: error.stack
-        });
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('Error fetching group courses:', error);
+        
+        // Check if it's a table not found error
+        if (error.errno === 1146 || error.code === 'ER_NO_SUCH_TABLE') {
+            console.error('Group courses table does not exist. Database may need to be initialized.');
+            return res.status(503).json({ 
+                error: 'Database not properly initialized. Group courses table is missing.',
+                code: 'TABLE_NOT_FOUND',
+                table: error.message.includes('group_courses') ? 'group_courses' : 'group_reservations'
+            });
+        }
+        
+        // Check if it's a database connection error
+        if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED' || error.code === 'ER_ACCESS_DENIED_ERROR') {
+            console.error('Database connection failed:', error.code);
+            return res.status(503).json({ 
+                error: 'Database service unavailable',
+                code: 'DB_CONNECTION_FAILED'
+            });
+        }
+        
+        res.status(500).json({ error: 'Internal server error', details: error.message });
     }
 });
 

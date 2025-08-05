@@ -1,7 +1,7 @@
 const mysql = require('mysql2');
 require('dotenv').config();
 
-// Enhanced pool configuration for free hosting (AlwaysData)
+// Enhanced pool configuration for free hosting (AlwaysData/Heroku)
 const poolConfig = {
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'root',
@@ -10,7 +10,7 @@ const poolConfig = {
     port: process.env.DB_PORT || 3306,
     timezone: '+01:00',
     waitForConnections: true,
-    connectionLimit: 3, // Further reduced for Heroku + free hosting
+    connectionLimit: process.env.NODE_ENV === 'production' ? 2 : 10, // Very low for free hosting
     queueLimit: 0,
     // Handle connection issues gracefully
     ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
@@ -36,32 +36,41 @@ const executeWithRetry = async (query, params = [], maxRetries = 3) => {
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            console.log(`Database query attempt ${attempt}/${maxRetries}`);
+            console.log(`Database query attempt ${attempt}/${maxRetries}: ${query.substring(0, 50)}...`);
             const result = await promisePool.execute(query, params);
             console.log(`Database query successful on attempt ${attempt}`);
             return result;
         } catch (error) {
             lastError = error;
             console.error(`Database query failed on attempt ${attempt}:`, error.message);
+            console.error(`Error code: ${error.code}, Error number: ${error.errno}`);
             
-            // Check if it's a connection-related error
+            // Check if it's a connection-related error or database not available
             const isConnectionError = 
                 error.code === 'ECONNRESET' ||
                 error.code === 'ENOTFOUND' ||
                 error.code === 'ETIMEDOUT' ||
                 error.code === 'ECONNREFUSED' ||
+                error.code === 'ER_ACCESS_DENIED_ERROR' ||
+                error.code === 'ER_BAD_DB_ERROR' ||
+                error.code === 'ER_NO_SUCH_TABLE' ||
+                error.errno === 1146 || // Table doesn't exist
+                error.errno === 1049 || // Database doesn't exist
                 error.fatal === true ||
                 error.message.includes('connection') ||
-                error.message.includes('timeout');
+                error.message.includes('timeout') ||
+                error.message.includes('PROTOCOL_CONNECTION_LOST');
             
             if (isConnectionError && attempt < maxRetries) {
-                console.log(`Connection error detected, retrying in ${attempt * 1000}ms...`);
-                await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+                const delayMs = attempt * 2000; // Increase delay: 2s, 4s, 6s
+                console.log(`Connection error detected, retrying in ${delayMs}ms...`);
+                await new Promise(resolve => setTimeout(resolve, delayMs));
                 continue;
             }
             
             // If it's not a connection error or we've exceeded retries, throw the error
             if (attempt === maxRetries) {
+                console.error(`Final attempt failed. Throwing error: ${lastError.message}`);
                 throw lastError;
             }
         }
@@ -78,9 +87,9 @@ const warmConnection = async () => {
     }
 };
 
-// Warm the connection on startup and every 10 minutes (reduced frequency for free hosting)
+// Warm the connection on startup and every 4 minutes
 warmConnection();
-setInterval(warmConnection, 10 * 60 * 1000); // Every 10 minutes
+setInterval(warmConnection, 4 * 60 * 1000); // Every 4 minutes
 
 // Handle pool errors
 pool.on('connection', (connection) => {

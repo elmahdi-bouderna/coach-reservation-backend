@@ -5,21 +5,34 @@ const { verifyToken, verifyAdmin } = require('./auth');
 
 // Get all packs (public route - clients can see all active packs)
 router.get('/', async (req, res) => {
-    console.log('Packs endpoint accessed - starting query...');
     try {
-        console.log('Executing packs query...');
+        console.log('Fetching active packs...');
         const [packs] = await db.execute('SELECT * FROM packs WHERE is_active = 1 ORDER BY points ASC');
-        console.log(`Packs query successful - found ${packs.length} packs`);
+        console.log(`Found ${packs.length} active packs`);
         res.json(packs);
     } catch (error) {
-        console.error('Error fetching packs:', {
-            message: error.message,
-            code: error.code,
-            errno: error.errno,
-            fatal: error.fatal,
-            stack: error.stack
-        });
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('Error fetching packs:', error);
+        
+        // Check if it's a table not found error
+        if (error.errno === 1146 || error.code === 'ER_NO_SUCH_TABLE') {
+            console.error('Packs table does not exist. Database may need to be initialized.');
+            return res.status(503).json({ 
+                error: 'Database not properly initialized. Packs table is missing.',
+                code: 'TABLE_NOT_FOUND',
+                table: 'packs'
+            });
+        }
+        
+        // Check if it's a database connection error
+        if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED' || error.code === 'ER_ACCESS_DENIED_ERROR') {
+            console.error('Database connection failed:', error.code);
+            return res.status(503).json({ 
+                error: 'Database service unavailable',
+                code: 'DB_CONNECTION_FAILED'
+            });
+        }
+        
+        res.status(500).json({ error: 'Internal server error', details: error.message });
     }
 });
 

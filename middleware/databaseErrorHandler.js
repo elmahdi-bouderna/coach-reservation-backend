@@ -9,11 +9,10 @@ const handleDatabaseError = (error, req, res, next) => {
         sqlState: error.sqlState,
         url: req.originalUrl,
         method: req.method,
-        timestamp: new Date().toISOString(),
-        fatal: error.fatal
+        timestamp: new Date().toISOString()
     });
 
-    // Only treat as connection errors if they are truly connection-related
+    // Connection-related errors
     const connectionErrors = [
         'ECONNRESET',
         'ENOTFOUND', 
@@ -23,10 +22,8 @@ const handleDatabaseError = (error, req, res, next) => {
         'PROTOCOL_CONNECTION_LOST'
     ];
 
-    // Only return 503 for truly fatal connection errors
-    if ((connectionErrors.includes(error.code) && error.fatal) || 
-        (error.code === 'PROTOCOL_CONNECTION_LOST')) {
-        console.log('Fatal database connection issue detected, attempting to recover...');
+    if (connectionErrors.includes(error.code) || error.fatal) {
+        console.log('Database connection issue detected, attempting to recover...');
         
         // Try to warm the connection
         db.warmConnection().catch(warmError => {
@@ -49,8 +46,7 @@ const handleDatabaseError = (error, req, res, next) => {
         });
     }
 
-    // For non-connection errors, let the route handle it
-    next(error);
+    // Syntax or constraint errors (don't retry)
     const permanentErrors = [
         'ER_PARSE_ERROR',
         'ER_NO_SUCH_TABLE',
